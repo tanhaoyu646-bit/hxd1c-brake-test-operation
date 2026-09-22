@@ -2,6 +2,22 @@
 
 本项目是从 HXD1C 发车作业项目指定基线隔离得到的独立副本，不沿用原项目 GitHub 远程仓库。
 
+**在线实训地址（GitHub Pages）**：https://tanhaoyu646-bit.github.io/hxd1c-brake-test-operation/
+
+与其他课程实训项目并列的独立仓库：
+
+| 项目 | 仓库 / 在线地址 |
+|---|---|
+| 出勤作业 | https://tanhaoyu646-bit.github.io/Running-Service-Bulletin/ |
+| 机车检查作业 | https://tanhaoyu646-bit.github.io/hxd3d-locomotive-inspection/ |
+| 发车作业 | https://tanhaoyu646-bit.github.io/hxd1c-departure-operation/ |
+| **制动机试验（本项目）** | https://tanhaoyu646-bit.github.io/hxd1c-brake-test-operation/ |
+
+本地开发与验收：
+
+- 电脑端 `http://localhost:9612/index.html`（双击 `启动制动试验（9612）.bat`）
+- 手机端 `http://<本机局域网IP>:9612/index.html`（同一 WiFi，横屏）
+
 当前开发范围：列车自动制动机简略试验。
 
 - 确认列车管定压稳定
