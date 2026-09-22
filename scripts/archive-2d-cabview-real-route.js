@@ -2,6 +2,7 @@ import { TrainSimulation } from './dynamics.js?rev=simple-brake-test-v1-20260922
 import { MstsRouteScene } from './mstsRouteScene.js?rev=side-view-correction-v7-20260920';
 import { createSimpleBrakeAttempt, EXHAUST_ANSWER_LABELS } from './brakeTestScenarios.js';
 import { BrakeTestWorkflow } from './brakeTestWorkflow.js';
+import { buildBrakeTestRecord, formatRecordText, buildRecordHtml } from './brakeTestRecord.js';
 
 const $ = (q) => document.querySelector(q);
 const attempt = createSimpleBrakeAttempt(location.search);
@@ -50,6 +51,8 @@ function tractionFrame(value) { return value > 0 ? Math.max(0,7-Math.min(7,value
 let elements={};
 function startDrag(id, el, event) {
   event.preventDefault();
+  // 自阀按"一次拖动=一次操作"计次；拖动必然经过中间档位，不能按档位变化计数。
+  if(id==='auto')workflow.noteAutoBrakeDrag();
   const range=id==='traction'?15:5;
   activeDrag={id,pointerId:event.pointerId,startY:event.clientY,start:sim.state[id==='auto'?'autoBrake':id==='independent'?'independentBrake':'traction'],pixelsPerStep:Math.max(8,el.getBoundingClientRect().height/range)};
   try{event.currentTarget.setPointerCapture?.(event.pointerId);}catch{ /* 部分 iOS WebKit 不开放指针捕获，窗口级监听仍可完成拖动。 */ }
@@ -177,7 +180,7 @@ function renderLkj(){
 }
 function openLkj(){if(!lkjRoot)buildLkj();closeSwitchPanel();lkjPhase=sim.state.lkjConfirmed?'done':'boot';lkjDraft=sim.state.lkjData&&!sim.state.lkjData.debug?{...sim.state.lkjData}:{};lkjRoot.classList.add('open');lkjRoot.setAttribute('aria-hidden','false');document.body.classList.add('device-panel-active');lkjStartAudio.currentTime=0;lkjStartAudio.play().catch(()=>{});renderLkj();}
 function closeLkj(){if(!lkjRoot)return;lkjRoot.classList.remove('open');lkjRoot.setAttribute('aria-hidden','true');document.body.classList.remove('device-panel-active');}
-function closeDevicePanels(){closeSwitchPanel();closePowerCabinet();closeLkj();if(hornPointerId!==null)stopHorn();else{hornAudio.pause();hornAudio.currentTime=0;if(sim.state.hornActive)command('horn-stop');}}
+function closeDevicePanels(){closeRecordModal();closeSwitchPanel();closePowerCabinet();closeLkj();if(hornPointerId!==null)stopHorn();else{hornAudio.pause();hornAudio.currentTime=0;if(sim.state.hornActive)command('horn-stop');}}
 function buildSwitchPanel(){
   const root=document.createElement('div');root.id='switch-panel-modal';root.className='switch-panel-modal';root.setAttribute('aria-hidden','true');
   root.innerHTML=`<div class="switch-panel-shell" role="dialog" aria-modal="true" aria-label="HXD1C板钮面板"><div class="switch-panel-head"><div><strong>板钮面板</strong><span>点击上半区或下半区拨动，板钮保持在所选位置</span></div><button type="button" class="switch-panel-close" aria-label="关闭板钮面板">×</button></div><div class="switch-panel-photo"><img src="./assets/switch-panel/HXD1C-switch-panel-reference.jpg" alt="HXD1C板钮面板实物参考" /><div class="switch-panel-controls"></div></div><div class="switch-panel-status">主断：上合/下分；受电弓：上升/下降；空压机：上投入/下停止。</div></div>`;
@@ -216,9 +219,14 @@ function bindDrag() { addEventListener('pointermove',(event)=>{ if(!activeDrag||
 function activeState(id,state) { return Boolean(state[id==='panto'?'panto':id==='main-breaker'?'mainBreaker':id==='control-power'?'powerOn':id==='parking'?'parkingBrake':id==='headlight'?'headlight':id==='compressor'?'compressor':id==='authority'?'authority':id==='horn'?'hornActive':id==='lkj'?'lkjConfirmed':id==='reset'?'vigilanceAcknowledged':false]); }
 function renderTraining(state,message='') {
   const steps=workflow.getSteps(state);const current=steps.findIndex(step=>!step.done);
+  const conclusion=workflow.getConclusion(state);
   $('#procedure').innerHTML=steps.map((step,index)=>`<li class="${step.done?'done':index===current?'active current':'blocked'}">${step.label}</li>`).join('');
   const a=attempt;const holdRemaining=Math.max(0,a.holdDuration-workflow.holdElapsed);const holdPercent=Math.min(100,workflow.holdElapsed/a.holdDuration*100);
-  const stateLabel=workflow.phase==='COMPLETE'?'<span class="training-complete">试验完成</span>':workflow.phase==='FAILED'?'<span class="training-failed">试验不合格</span>':`第 ${Math.max(1,current+1)} 步`;
+  // 结论与流程进度分开表达：流程走完不等于试验合格（排风时间异常属于"走完但不合格"）。
+  const stateLabel=workflow.phase==='COMPLETE'
+    ?(conclusion.pass?'<span class="training-complete">试验合格</span>':'<span class="training-failed">试验完成 · 结论不合格</span>')
+    :workflow.phase==='FAILED'?'<span class="training-failed">试验不合格</span>'
+    :`第 ${Math.max(1,current+1)} 步`;
   $('#status').innerHTML=`<strong>状态：</strong>${stateLabel}<div class="status-grid"><span>总风 <b>${state.mainRes.toFixed(0)} kPa</b></span><span>均衡风缸 <b>${state.equalizingRes.toFixed(0)} kPa</b></span><span>列车管 <b>${state.trainPipe.toFixed(0)} kPa</b></span><span>尾部风压 <b>${state.tailPipe.toFixed(0)} kPa</b></span><span>制动缸 <b>${state.brakeCyl.toFixed(0)} kPa</b></span><span>保压剩余 <b>${workflow.phase==='HOLD'?holdRemaining.toFixed(0)+' s':'—'}</b></span></div><div class="hold-progress" style="--hold-progress:${holdPercent}%"><i></i></div>`;
   $('#attempt-summary').innerHTML=`<strong>${a.title}</strong><br>编组 ${a.formationCars} 辆 · 定压 ${a.nominalTrainPipe} kPa · 目标 ${a.targetTrainPipe} kPa${a.debugFast?'<br><span class="tag">调试模式：保压时间已缩短</span>':''}`;
   const observation=$('#observation');const latest=workflow.tailReleaseQuery||workflow.tailBrakeQuery;
@@ -230,7 +238,13 @@ function renderTraining(state,message='') {
   $('#confirm-tail-brake').disabled=workflow.phase!=='HOLD'||!workflow.tailBrakeQuery?.passed||workflow.tailBrakeConfirmed;
   $('#query-tail-release').disabled=workflow.phase!=='RELEASE'||workflow.releaseStart===null;
   $('#confirm-tail-release').disabled=workflow.phase!=='RELEASE'||!workflow.tailReleaseQuery?.passed||workflow.tailReleaseConfirmed;
+  $('#open-record').disabled=!(workflow.phase==='COMPLETE'||workflow.phase==='FAILED');
   if(message||workflow.message)$('#hint').textContent=message||workflow.message;
+  // 流程走完或中止时自动出单一次；结论不合格时把原因直接写到提示栏，避免"完成"被误读为"合格"。
+  if(workflow.phase==='COMPLETE'||workflow.phase==='FAILED'){
+    if(!conclusion.pass)$('#hint').textContent=`判定不合格：${conclusion.reasons.join('；')}。已生成试验记录单。`;
+    if(!recordAutoShown){recordAutoShown=true;setTimeout(openRecordModal,420);}
+  }
 }
 function render(state,message='') {
   routeScene.update(state.distance,state.speed,selectedView);
@@ -280,11 +294,37 @@ $('#judge-exhaust').addEventListener('click',openAnswerModal);
 $('#answer-close').addEventListener('click',closeAnswerModal);
 $('#answer-modal').addEventListener('click',(event)=>{if(event.target===$('#answer-modal'))closeAnswerModal();});
 document.querySelectorAll('[data-answer]').forEach(button=>button.addEventListener('click',()=>{const result=workflow.submitExhaustAnswer(button.dataset.answer);const feedback=$('#answer-feedback');if(!result.accepted)return;feedback.textContent=result.correct?'判断正确。':'判断不正确，请重新选择。';feedback.className=`answer-feedback ${result.correct?'ok':'error'}`;if(result.correct)setTimeout(closeAnswerModal,500);}));
+let recordAutoShown=false;
+function currentRecord(){return buildBrakeTestRecord({attempt,state:sim.state,workflow});}
+function renderRecord(){
+  const record=currentRecord();const html=buildRecordHtml(record);
+  $('#record-meta').innerHTML=`试验编号 ${record.header.attemptId}<br>场景 ${record.header.scenario} · 编组 ${record.header.formationCars} 辆 · 定压 ${record.header.nominalTrainPipe} kPa · 减压量 ${record.header.targetReduction} kPa<br>开始 ${record.header.createdAt} · 出单 ${record.header.generatedAt}${record.header.debugFast?'<br><span class="tag">调试模式：保压时间已缩短，不得作为正式记录</span>':''}`;
+  $('#record-body').innerHTML=html.body;
+  $('#record-conclusion').className=`record-conclusion ${record.conclusion.pass?'pass':'bad'}`;
+  $('#record-conclusion').innerHTML=html.conclusion;
+  $('#record-score').innerHTML=html.score;
+  return record;
+}
+function openRecordModal(){renderRecord();$('#record-modal').classList.add('open');$('#record-modal').setAttribute('aria-hidden','false');document.body.classList.add('device-panel-active');}
+function closeRecordModal(){const modal=$('#record-modal');if(!modal)return;modal.classList.remove('open');modal.setAttribute('aria-hidden','true');document.body.classList.remove('device-panel-active');}
+$('#open-record').addEventListener('click',openRecordModal);
+$('#record-close').addEventListener('click',closeRecordModal);
+$('#record-modal').addEventListener('click',(event)=>{if(event.target===$('#record-modal'))closeRecordModal();});
+$('#record-copy').addEventListener('click',async()=>{
+  const button=$('#record-copy');const text=formatRecordText(currentRecord());
+  try{
+    if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(text);
+    else{const area=document.createElement('textarea');area.value=text;area.style.position='fixed';area.style.opacity='0';document.body.append(area);area.select();document.execCommand('copy');area.remove();}
+    button.textContent='已复制到剪贴板';
+  }catch{button.textContent='复制失败，请手动选择文本';}
+  setTimeout(()=>{button.textContent='复制记录单文本';},1800);
+});
+$('#record-print').addEventListener('click',()=>window.print());
 $('#query-tail-brake').addEventListener('click',()=>workflow.queryTail(sim.state,'brake'));
 $('#confirm-tail-brake').addEventListener('click',()=>workflow.confirmTail('brake'));
 $('#query-tail-release').addEventListener('click',()=>workflow.queryTail(sim.state,'release'));
 $('#confirm-tail-release').addEventListener('click',()=>workflow.confirmTail('release'));
-$('#restart-test').addEventListener('click',()=>{closeAnswerModal();closeDevicePanels();workflow.reset();sim.reset();setView('front');});
+$('#restart-test').addEventListener('click',()=>{closeAnswerModal();closeDevicePanels();workflow.reset();sim.reset();recordAutoShown=false;setView('front');});
 $('#enter-training').addEventListener('click',enterImmersive);
 $('#exit-immersive').addEventListener('click',exitImmersive);
 addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement&&document.documentElement.classList.contains('immersive')&&!mobileLike)document.documentElement.classList.remove('immersive');routeScene.resize();});

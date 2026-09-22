@@ -26,13 +26,24 @@ export class BrakeTestWorkflow {
     this.holdPassed = false;
     this.holdFailed = false;
     this.leakage = 0;
+    this.leakagePerMinute = null;
     this.answerAttempts = [];
     this.answerCorrect = false;
+    this.answerFirstTryCorrect = null;
+    this.tailQueryAttempts = { brake: 0, release: 0 };
+    this.tailFailStreak = { brake: 0, release: 0 };
+    this.tailFirstQueryAt = { brake: null, release: null };
+    this.failureReason = null;
     this.tailBrakeQuery = null;
     this.tailBrakeConfirmed = false;
     this.releaseStart = null;
     this.tailReleaseQuery = null;
     this.tailReleaseConfirmed = false;
+    // 「一次减压到位」按"减压阶段拖动自阀的独立操作次数"计，而不是按档位变化次数：
+    // 物理自阀必然要连续经过中间档位，用价值变化计数会把一次顺畅操作误判成多次。
+    this.autoBrakeOperations = 0;
+    this.reductionLevel = null;
+    this.stabilizedPressure = null;
     this.events = [];
     this.lastTimerSecond = -1;
     this.emit();
@@ -56,10 +67,20 @@ export class BrakeTestWorkflow {
     }
     if (this.phase === 'HOLD') return { allowed: false, message: '正在保压试验，未完成前禁止移动自阀。' };
     if (this.phase === 'RELEASE') {
-      if (next !== 0) return { allowed: false, message: '请将自阀回运转位，执行充风缓解。' };
+      // 自阀回运转位必须连续经过中间档位，这里只校验范围，
+      // 否则拖动过程会被误判成"操作无关设备"并累加扣分。
+      if (next < 0 || next > 5) return { allowed: false, message: '自阀档位超出有效范围。' };
       return { allowed: true };
     }
     return { allowed: false, message: '当前步骤不需要操作自阀。' };
+  }
+
+  /**
+   * 一次拖动自阀 = 一次操作。只有减压阶段的操作计入"一次减压到位"评价，
+   * 否则回运转位的必备动作也会被算成多余操作。
+   */
+  noteAutoBrakeDrag() {
+    if (this.phase === 'REDUCE') this.autoBrakeOperations += 1;
   }
 
   afterCommand(id, value, state) {
@@ -84,6 +105,9 @@ export class BrakeTestWorkflow {
         && Math.abs(state.tailPipe - a.nominalTrainPipe) <= a.stablePressureTolerance
         && state.autoBrake === 0;
       this.stableElapsed = stable ? this.stableElapsed + dt : 0;
+      // 记录试验开始时的定压实测值：记录单必须写"试验前的定压"，
+      // 不能用试验结束后（已减压、已缓解）的当前压力冒充。
+      if (stable) this.stabilizedPressure = { head: state.trainPipe, tail: state.tailPipe };
       if (this.stableElapsed >= a.stableDuration) {
         this.phase = 'REDUCE';
         this.log('pressure-stable', { head: state.trainPipe, tail: state.tailPipe });
@@ -95,6 +119,7 @@ export class BrakeTestWorkflow {
     if (this.phase === 'REDUCE' && this.reductionStart !== null) {
       if (state.trainPipe <= a.targetTrainPipe + a.targetPressureTolerance) {
         this.reductionReachedAt = state.elapsed;
+        this.reductionLevel = state.autoBrake;
         this.exhaustSeconds = Math.max(0, this.reductionReachedAt - this.reductionStart);
         this.holdStart = state.elapsed;
         this.holdStartPressure = state.trainPipe;
@@ -118,6 +143,7 @@ export class BrakeTestWorkflow {
         const pressureSettlingAllowance = a.targetPressureTolerance * 2;
         const measuredLeakage = Math.max(0, this.leakage - pressureSettlingAllowance);
         const normalizedLeakage = measuredLeakage * 60 / a.holdDuration;
+        this.leakagePerMinute = normalizedLeakage;
         if (normalizedLeakage <= a.maxLeakagePerMinute) {
           this.holdPassed = true;
           this.log('hold-pass', { leakagePerMinute: normalizedLeakage });
@@ -145,7 +171,8 @@ export class BrakeTestWorkflow {
       if (headRecovered && tailRecovered && cylinderReleased && this.tailReleaseQuery?.passed && this.tailReleaseConfirmed) {
         this.phase = 'COMPLETE';
         this.log('complete', { head: state.trainPipe, tail: state.tailPipe, cylinder: state.brakeCyl });
-        this.setMessage('列车自动制动机简略试验完成，制动与缓解作用正常。');
+        // 结论由 getConclusion() 统一给出：排风时间异常时流程同样走完，但结论不合格。
+        this.setMessage('试验流程已走完，请核对试验记录单确认最终结论。');
       }
     }
   }
@@ -158,12 +185,33 @@ export class BrakeTestWorkflow {
     const expected = classifyExhaustTime(this.exhaustSeconds, this.attempt.expectedExhaustSeconds);
     const correct = answer === expected;
     this.answerAttempts.push({ answer, expected, correct });
+    if (this.answerAttempts.length === 1) this.answerFirstTryCorrect = correct;
     this.answerCorrect = correct;
     this.log('exhaust-answer', { answer, expected, correct });
     this.setMessage(correct
       ? `判断正确：本次${EXHAUST_ANSWER_LABELS[expected]}。`
       : `判断不正确。请结合编组和排风时间表重新判断。`);
     return { accepted: true, correct, expected };
+  }
+
+  /**
+   * 列尾风压查询。
+   *
+   * 压力沿列车管传导需要时间，等待后重查属于正常操作；但若持续不跟随，
+   * 说明列车管可能未贯通——此时必须给出「不合格」出口，否则学员会无限重查、
+   * 流程永远停在保压阶段（异常工况下没有结论，是比"判错"更严重的教学缺陷）。
+   */
+  trackTailQuery(stage, state, passed) {
+    if (this.tailFirstQueryAt[stage] === null) this.tailFirstQueryAt[stage] = state.elapsed;
+    if (passed) { this.tailFailStreak[stage] = 0; return; }
+    this.tailFailStreak[stage] += 1;
+    const waited = state.elapsed - this.tailFirstQueryAt[stage];
+    if (this.tailFailStreak[stage] >= 4 && waited >= 20) {
+      this.failureReason = '列车管未贯通：尾部风压持续未跟随车端变化（折角塞门关闭或制动主管不畅）';
+      this.phase = 'FAILED';
+      this.log('tail-unresponsive', { stage, attempts: this.tailFailStreak[stage], waited });
+      this.setMessage(`${this.failureReason}，试验不合格。已生成试验记录单。`);
+    }
   }
 
   queryTail(state, stage) {
@@ -176,11 +224,15 @@ export class BrakeTestWorkflow {
       const pressureDifference = Math.abs(state.tailPipe - state.trainPipe);
       const tailReduced = state.tailPipe <= a.targetTrainPipe + a.tailPressureTolerance;
       const passed = pressureDifference <= a.tailPressureTolerance && tailReduced;
+      this.tailQueryAttempts.brake += 1;
       this.tailBrakeQuery = { head: state.trainPipe, tail: state.tailPipe, pressureDifference, passed };
       this.log('tail-brake-query', this.tailBrakeQuery);
-      this.setMessage(passed
-        ? '尾部风压与机车端列车管压力变化对应，制动主管贯通。'
-        : '尾部风压尚未正常跟随，请等待压力传播后重新查询。');
+      this.trackTailQuery('brake', state, passed);
+      if (this.phase !== 'FAILED') {
+        this.setMessage(passed
+          ? '尾部风压与机车端列车管压力变化对应，制动主管贯通。'
+          : `尾部风压尚未正常跟随（第 ${this.tailFailStreak.brake} 次），请等待压力传播后重新查询。`);
+      }
       return this.tailBrakeQuery;
     }
     if (stage === 'release') {
@@ -191,11 +243,15 @@ export class BrakeTestWorkflow {
       const pressureDifference = Math.abs(state.tailPipe - state.trainPipe);
       const tailRecovered = state.tailPipe >= a.nominalTrainPipe - a.tailPressureTolerance;
       const passed = pressureDifference <= a.tailPressureTolerance && tailRecovered;
+      this.tailQueryAttempts.release += 1;
       this.tailReleaseQuery = { head: state.trainPipe, tail: state.tailPipe, pressureDifference, passed };
       this.log('tail-release-query', this.tailReleaseQuery);
-      this.setMessage(passed
-        ? '尾部风压已随列车管充风恢复。请获取最后一辆车缓解确认。'
-        : '尾部风压尚未恢复，请稍后重新查询。');
+      this.trackTailQuery('release', state, passed);
+      if (this.phase !== 'FAILED') {
+        this.setMessage(passed
+          ? '尾部风压已随列车管充风恢复。请获取最后一辆车缓解确认。'
+          : `尾部风压尚未恢复（第 ${this.tailFailStreak.release} 次），请稍后重新查询。`);
+      }
       return this.tailReleaseQuery;
     }
     return null;
@@ -237,5 +293,110 @@ export class BrakeTestWorkflow {
       { label: '自阀回运转位并充风缓解', done: released },
       { label: '查询尾部风压并确认缓解', done: this.phase === 'COMPLETE' },
     ];
+  }
+
+  /**
+   * 逐项物理判定，供试验记录单与结论使用。
+   *
+   * 教学口径：排风时间异常只影响「结论」，不中止流程——简略试验在排风时间异常时
+   * 仍须继续确认制动与缓解作用，所以流程照常走完，但结论判为不合格并给出检查方向。
+   */
+  getJudgements(state) {
+    const a = this.attempt;
+    const exhaustVerdict = !Number.isFinite(this.exhaustSeconds)
+      ? 'unknown'
+      : classifyExhaustTime(this.exhaustSeconds, a.expectedExhaustSeconds);
+    const tailText = (query) => (query
+      ? `${Math.round(query.head)} / ${Math.round(query.tail)} kPa（差 ${Math.round(query.pressureDifference)}）`
+      : '未查询');
+    const verdictOf = (query, confirmed) => {
+      if (query?.passed && confirmed) return 'pass';
+      if (query && !query.passed) return 'fail';
+      return 'pending';
+    };
+
+    return [
+      {
+        label: '列车管定压',
+        actual: this.stabilizedPressure
+          ? `${Math.round(this.stabilizedPressure.head)} kPa（尾部 ${Math.round(this.stabilizedPressure.tail)} kPa）`
+          : '未确认',
+        reference: `${a.nominalTrainPipe} ± ${a.stablePressureTolerance} kPa`,
+        verdict: this.phase === 'STABILIZING' ? 'pending' : 'pass',
+        note: '',
+      },
+      {
+        label: '减压量',
+        actual: this.reductionReachedAt !== null ? `${a.targetReduction} kPa（自阀第 ${this.reductionLevel} 档）` : '未减压',
+        reference: `${a.targetReduction} kPa（自阀第 2 档）`,
+        verdict: this.reductionReachedAt === null ? 'pending' : 'pass',
+        note: this.reductionReachedAt !== null && this.autoBrakeOperations > 1
+          ? `自阀经 ${this.autoBrakeOperations} 次操作才到位，简略试验要求一次减压到位`
+          : '',
+      },
+      {
+        label: '排风时间',
+        actual: Number.isFinite(this.exhaustSeconds) ? `${this.exhaustSeconds.toFixed(1)} s` : '未测得',
+        reference: `${a.expectedExhaustSeconds.min} ～ ${a.expectedExhaustSeconds.max} s`,
+        verdict: exhaustVerdict === 'normal' ? 'pass' : exhaustVerdict === 'unknown' ? 'pending' : 'fail',
+        note: exhaustVerdict === 'short'
+          ? '实测值低于参考下限，可能存在折角塞门关闭或制动主管不畅，应检查列车管贯通状态'
+          : exhaustVerdict === 'long'
+            ? '实测值高于参考上限，与编组不符，可能存在漏泄或车列连接异常，应检查制动主管与车列编组'
+            : '',
+      },
+      {
+        // 保压时长是否达标与漏泄是否超限是两回事：保压满了但漏泄超限时，
+        // 保压时间应记"合格"，不能跟着漏泄一起判不合格。
+        label: '保压时间',
+        actual: this.holdStart === null ? '未保压' : `${this.holdElapsed.toFixed(0)} s`,
+        reference: `≥ ${a.holdDuration} s`,
+        verdict: this.holdElapsed >= a.holdDuration ? 'pass' : 'pending',
+        note: '',
+      },
+      {
+        label: '列车管漏泄量',
+        actual: this.leakagePerMinute === null ? '未测定' : `${this.leakagePerMinute.toFixed(1)} kPa/min`,
+        reference: `≤ ${a.maxLeakagePerMinute} kPa/min`,
+        verdict: this.holdPassed ? 'pass' : this.holdFailed ? 'fail' : 'pending',
+        note: this.holdFailed ? '列车管漏泄量超过允许值，试验不合格，须查明漏泄处所并处理' : '',
+      },
+      {
+        label: '列尾制动确认',
+        actual: tailText(this.tailBrakeQuery),
+        reference: `机车端与尾部压差 ≤ ${a.tailPressureTolerance} kPa 且尾部同步减压`,
+        verdict: verdictOf(this.tailBrakeQuery, this.tailBrakeConfirmed),
+        note: this.tailBrakeQuery && !this.tailBrakeQuery.passed
+          ? `尾部风压未跟随机车端变化（查询 ${this.tailQueryAttempts.brake} 次仍未通过），列车管可能未贯通，应检查折角塞门与制动主管`
+          : '',
+      },
+      {
+        label: '列尾缓解确认',
+        actual: tailText(this.tailReleaseQuery),
+        reference: `机车端与尾部压差 ≤ ${a.tailPressureTolerance} kPa 且尾部恢复定压`,
+        verdict: verdictOf(this.tailReleaseQuery, this.tailReleaseConfirmed),
+        note: this.tailReleaseQuery && !this.tailReleaseQuery.passed
+          ? `尾部风压未恢复定压（查询 ${this.tailQueryAttempts.release} 次仍未通过），须查明列车管过风受阻处所`
+          : '',
+      },
+    ];
+  }
+
+  getConclusion(state) {
+    const fails = this.getJudgements(state).filter((item) => item.verdict === 'fail');
+    const reasons = fails.map((item) => `${item.label}：${item.note || item.actual}`);
+    if (this.failureReason && !reasons.some((reason) => reason.startsWith(this.failureReason))) {
+      reasons.unshift(this.failureReason);
+    }
+    if (this.phase === 'FAILED') {
+      return { completed: false, pass: false, headline: '试验不合格（已中止）', reasons };
+    }
+    if (this.phase !== 'COMPLETE') {
+      return { completed: false, pass: false, headline: '试验未完成', reasons: [] };
+    }
+    if (!fails.length) {
+      return { completed: true, pass: true, headline: '试验合格', reasons: [] };
+    }
+    return { completed: true, pass: false, headline: '试验完成，但结论不合格', reasons };
   }
 }
