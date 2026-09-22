@@ -1,5 +1,5 @@
 import { TrainSimulation } from './dynamics.js?rev=simple-brake-test-v1-20260922';
-import { MstsRouteScene } from './mstsRouteScene.js?rev=side-view-correction-v7-20260920';
+import { MstsRouteScene } from './mstsRouteScene.js?rev=relative-path-fix-v8-20260922';
 import { createSimpleBrakeAttempt, EXHAUST_ANSWER_LABELS, SCENARIO_OPTIONS, EXAM_KEY } from './brakeTestScenarios.js';
 import { BrakeTestWorkflow } from './brakeTestWorkflow.js';
 import { buildBrakeTestRecord, formatRecordText, buildRecordHtml } from './brakeTestRecord.js';

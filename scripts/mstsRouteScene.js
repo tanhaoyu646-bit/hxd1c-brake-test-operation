@@ -1,8 +1,11 @@
 import * as THREE from '../lib/three/three.module.js';
 
-const SOURCE_PATH = '../assets/msts-neiyi-corridor/neiyi-neijiang-neijiangnan-scene.json';
-const ROUTE_PATH = '../assets/msts-neiyi/neiyi-5635-trackdb-path.json';
-const TEXTURE_PATH = '../assets/msts-neiyi-corridor/textures/';
+// 注意：下面三条是交给 fetch() 的地址，相对的是**页面地址**，不是本模块地址。
+// 早先写成 '../assets/…'：本地页面在根目录时碰巧能跑，一旦部署到 GitHub Pages 的子路径
+// （/<repo>/index.html）就会跳出到域名根，导致窗外线路场景整体 404。
+const SOURCE_PATH = './assets/msts-neiyi-corridor/neiyi-neijiang-neijiangnan-scene.json';
+const ROUTE_PATH = './assets/msts-neiyi/neiyi-5635-trackdb-path.json';
+const TEXTURE_PATH = './assets/msts-neiyi-corridor/textures/';
 const NEXT_STATION_DISTANCE = 12591.44;
 
 export class MstsRouteScene {
