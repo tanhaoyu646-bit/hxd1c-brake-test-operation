@@ -1,13 +1,14 @@
 import { TrainSimulation } from './dynamics.js?rev=simple-brake-test-v1-20260922';
 import { MstsRouteScene } from './mstsRouteScene.js?rev=side-view-correction-v7-20260920';
-import { createSimpleBrakeAttempt, EXHAUST_ANSWER_LABELS } from './brakeTestScenarios.js';
+import { createSimpleBrakeAttempt, EXHAUST_ANSWER_LABELS, SCENARIO_OPTIONS, EXAM_KEY } from './brakeTestScenarios.js';
 import { BrakeTestWorkflow } from './brakeTestWorkflow.js';
 import { buildBrakeTestRecord, formatRecordText, buildRecordHtml } from './brakeTestRecord.js';
 
 const $ = (q) => document.querySelector(q);
-const attempt = createSimpleBrakeAttempt(location.search);
-const sim = new TrainSimulation(attempt);
-const workflow = new BrakeTestWorkflow(attempt);
+// 场景可在运行中切换（教师指定 / 考核抽考），因此 attempt、sim、workflow 都是可替换的。
+let attempt = createSimpleBrakeAttempt(location.search);
+let sim = new TrainSimulation(attempt);
+let workflow = new BrakeTestWorkflow(attempt);
 const overlay = $('#overlay');
 const routeScene = new MstsRouteScene($('#route-scene'));
 const views = { front: 'HXD1C_front.png', left: 'HXD1C_left_full.png', right: 'HXD1C_right_full.png' };
@@ -228,7 +229,9 @@ function renderTraining(state,message='') {
     :workflow.phase==='FAILED'?'<span class="training-failed">试验不合格</span>'
     :`第 ${Math.max(1,current+1)} 步`;
   $('#status').innerHTML=`<strong>状态：</strong>${stateLabel}<div class="status-grid"><span>总风 <b>${state.mainRes.toFixed(0)} kPa</b></span><span>均衡风缸 <b>${state.equalizingRes.toFixed(0)} kPa</b></span><span>列车管 <b>${state.trainPipe.toFixed(0)} kPa</b></span><span>尾部风压 <b>${state.tailPipe.toFixed(0)} kPa</b></span><span>制动缸 <b>${state.brakeCyl.toFixed(0)} kPa</b></span><span>保压剩余 <b>${workflow.phase==='HOLD'?holdRemaining.toFixed(0)+' s':'—'}</b></span></div><div class="hold-progress" style="--hold-progress:${holdPercent}%"><i></i></div>`;
-  $('#attempt-summary').innerHTML=`<strong>${a.title}</strong><br>编组 ${a.formationCars} 辆 · 定压 ${a.nominalTrainPipe} kPa · 目标 ${a.targetTrainPipe} kPa${a.debugFast?'<br><span class="tag">调试模式：保压时间已缩短</span>':''}`;
+  // 考核模式下不告知注入了哪种故障，只给编组与压力这类学员本来就该知道的信息。
+  const summaryTitle=a.exam?'考核模式 · 本轮场景不告知':a.title;
+  $('#attempt-summary').innerHTML=`<strong>${summaryTitle}</strong><br>编组 ${a.formationCars} 辆 · 定压 ${a.nominalTrainPipe} kPa · 目标 ${a.targetTrainPipe} kPa${a.debugFast?'<br><span class="tag">调试模式：保压时间已缩短</span>':''}`;
   const observation=$('#observation');const latest=workflow.tailReleaseQuery||workflow.tailBrakeQuery;
   if(latest){observation.innerHTML=`最近列尾查询：机车端 <b>${latest.head.toFixed(0)}</b> kPa，尾部 <b>${latest.tail.toFixed(0)}</b> kPa，差值 <b>${latest.pressureDifference.toFixed(0)}</b> kPa。<br>${latest.passed?'压力变化对应，列车管贯通。':'压力尚未正常跟随，需要重新查询。'}`;observation.className=`observation ${latest.passed?'pass':'warn'}`;}
   else if(Number.isFinite(workflow.exhaustSeconds)){observation.innerHTML=`本次列车管减压耗时 <b>${workflow.exhaustSeconds.toFixed(1)} 秒</b>。请根据编组和排风时间表完成判断。`;observation.className='observation';}
@@ -298,7 +301,10 @@ let recordAutoShown=false;
 function currentRecord(){return buildBrakeTestRecord({attempt,state:sim.state,workflow});}
 function renderRecord(){
   const record=currentRecord();const html=buildRecordHtml(record);
-  $('#record-meta').innerHTML=`试验编号 ${record.header.attemptId}<br>场景 ${record.header.scenario} · 编组 ${record.header.formationCars} 辆 · 定压 ${record.header.nominalTrainPipe} kPa · 减压量 ${record.header.targetReduction} kPa<br>开始 ${record.header.createdAt} · 出单 ${record.header.generatedAt}${record.header.debugFast?'<br><span class="tag">调试模式：保压时间已缩短，不得作为正式记录</span>':''}`;
+  const sceneLine=record.header.exam
+    ?`场景 <span class="tag">考核抽考</span> · 本轮实际注入：${record.header.scenario}`
+    :`场景 ${record.header.scenario}`;
+  $('#record-meta').innerHTML=`试验编号 ${record.header.attemptId}<br>${sceneLine} · 编组 ${record.header.formationCars} 辆 · 定压 ${record.header.nominalTrainPipe} kPa · 减压量 ${record.header.targetReduction} kPa<br>开始 ${record.header.createdAt} · 出单 ${record.header.generatedAt}${record.header.debugFast?'<br><span class="tag">调试模式：保压时间已缩短，不得作为正式记录</span>':''}`;
   $('#record-body').innerHTML=html.body;
   $('#record-conclusion').className=`record-conclusion ${record.conclusion.pass?'pass':'bad'}`;
   $('#record-conclusion').innerHTML=html.conclusion;
@@ -324,7 +330,38 @@ $('#query-tail-brake').addEventListener('click',()=>workflow.queryTail(sim.state
 $('#confirm-tail-brake').addEventListener('click',()=>workflow.confirmTail('brake'));
 $('#query-tail-release').addEventListener('click',()=>workflow.queryTail(sim.state,'release'));
 $('#confirm-tail-release').addEventListener('click',()=>workflow.confirmTail('release'));
-$('#restart-test').addEventListener('click',()=>{closeAnswerModal();closeDevicePanels();workflow.reset();sim.reset();recordAutoShown=false;setView('front');});
+function buildScenarioPicker(){
+  const select=$('#scenario-select');if(!select)return;
+  select.innerHTML=SCENARIO_OPTIONS.map(option=>`<option value="${option.key}">${option.label}</option>`).join('');
+  select.value=attempt.exam?EXAM_KEY:attempt.scenarioKey;
+  const warning=$('#scenario-warning');if(!warning)return;
+  if(attempt.scenarioValid){warning.hidden=true;warning.textContent='';return;}
+  const keys=SCENARIO_OPTIONS.filter(option=>option.key!==EXAM_KEY).map(option=>option.key).join(' / ');
+  warning.hidden=false;
+  warning.textContent=`地址参数 ?scenario=${attempt.requestedScenario} 不是有效场景，已按「正常 · 标准编组」运行。可用值：${keys}，或 ${EXAM_KEY}（考核抽考）。`;
+}
+/** 切换到新一轮：整组替换 attempt / sim / workflow，并复位记录单状态。 */
+function startAttempt(next){
+  closeAnswerModal();closeDevicePanels();
+  attempt=next;
+  sim=new TrainSimulation(attempt);
+  workflow=new BrakeTestWorkflow(attempt);
+  sim.onChange(render);
+  workflow.onChange(()=>renderTraining(sim.state));
+  recordAutoShown=false;
+  buildScenarioPicker();
+  setView('front');
+}
+$('#scenario-select')?.addEventListener('change',(event)=>{
+  const isExam=event.target.value===EXAM_KEY;
+  // 选「考核抽考」就现场抽一种：抽到什么在记录单出来之前都不显示给学员。
+  startAttempt(createSimpleBrakeAttempt(location.search,{scenario:isExam?EXAM_KEY:event.target.value,exam:isExam}));
+});
+$('#restart-test').addEventListener('click',()=>{
+  // 重新开始本轮试验沿用本轮已定的场景（含抽考已抽到的那一种），不重新抽签。
+  startAttempt(createSimpleBrakeAttempt(location.search,{scenario:attempt.scenarioKey,exam:attempt.exam}));
+});
+buildScenarioPicker();
 $('#enter-training').addEventListener('click',enterImmersive);
 $('#exit-immersive').addEventListener('click',exitImmersive);
 addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement&&document.documentElement.classList.contains('immersive')&&!mobileLike)document.documentElement.classList.remove('immersive');routeScene.resize();});

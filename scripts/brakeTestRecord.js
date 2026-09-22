@@ -65,6 +65,8 @@ export function buildBrakeTestRecord({ attempt, state, workflow, now = new Date(
       createdAt: formatDateTime(attempt.createdAt),
       generatedAt: formatDateTime(now),
       scenario: attempt.title,
+      scenarioKey: attempt.scenarioKey,
+      exam: Boolean(attempt.exam),
       formationCars: attempt.formationCars,
       nominalTrainPipe: attempt.nominalTrainPipe,
       targetReduction: attempt.targetReduction,
@@ -82,7 +84,7 @@ export function formatRecordText(record) {
   lines.push(header.title);
   lines.push('='.repeat(46));
   lines.push(`试验编号：${header.attemptId}`);
-  lines.push(`试验场景：${header.scenario}（编组 ${header.formationCars} 辆，定压 ${header.nominalTrainPipe} kPa）`);
+  lines.push(`试验场景：${header.scenario}${header.exam ? '（考核抽考 · 考试中未告知学员）' : ''}（编组 ${header.formationCars} 辆，定压 ${header.nominalTrainPipe} kPa）`);
   lines.push(`开始时间：${header.createdAt}`);
   lines.push(`出单时间：${header.generatedAt}`);
   lines.push('');
