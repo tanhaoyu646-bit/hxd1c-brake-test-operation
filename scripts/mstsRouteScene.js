@@ -6,6 +6,10 @@ import * as THREE from '../lib/three/three.module.js';
 const SOURCE_PATH = './assets/msts-neiyi-corridor/neiyi-neijiang-neijiangnan-scene.json';
 const ROUTE_PATH = './assets/msts-neiyi/neiyi-5635-trackdb-path.json';
 const TEXTURE_PATH = './assets/msts-neiyi-corridor/textures/';
+// 场景 JSON 引用的纹理名与实际文件名存在大小写差异（MSTS 转换遗留），
+// Windows 上不区分所以本地正常，GitHub Pages（Linux）会 404。
+// 用一份由 tools/gen-texture-manifest.py 生成的真实文件名清单做大小写归一。
+const TEXTURE_MANIFEST_PATH = './assets/msts-neiyi-corridor/textures/manifest.json';
 const NEXT_STATION_DISTANCE = 12591.44;
 
 export class MstsRouteScene {
@@ -36,6 +40,7 @@ export class MstsRouteScene {
     this.forward = new THREE.Vector3(-360.311, 0, 378.593).normalize();
     this.baseYaw = Math.atan2(-this.forward.x, -this.forward.z);
     this.materialCache = new Map();
+    this.textureNames = new Map();
     this.textureLoader = new THREE.TextureLoader();
     this.addEnvironment();
     this.applyCamera();
@@ -64,12 +69,20 @@ export class MstsRouteScene {
 
   async load() {
     try {
-      const [sceneResponse, pathResponse] = await Promise.all([
+      const [sceneResponse, pathResponse, manifestResponse] = await Promise.all([
         fetch(SOURCE_PATH, { cache: 'no-store' }),
         fetch(ROUTE_PATH, { cache: 'no-store' }),
+        fetch(TEXTURE_MANIFEST_PATH, { cache: 'no-store' }).catch(() => null),
       ]);
       if (!sceneResponse.ok) throw new Error(`路线场景加载失败：HTTP ${sceneResponse.status}`);
       if (!pathResponse.ok) throw new Error(`轨道中心线加载失败：HTTP ${pathResponse.status}`);
+      // 清单缺失时按原样请求，不影响主流程。
+      if (manifestResponse && manifestResponse.ok) {
+        try {
+          const manifest = await manifestResponse.json();
+          for (const [key, value] of Object.entries(manifest)) this.textureNames.set(key.toLowerCase(), value);
+        } catch { /* 清单格式异常就退化为按原样请求 */ }
+      }
       const [sceneData, pathData] = await Promise.all([sceneResponse.json(), pathResponse.json()]);
       this.buildRoute(sceneData);
       this.buildRoutePath(pathData);
@@ -87,8 +100,14 @@ export class MstsRouteScene {
     }
   }
 
+  /** 把场景 JSON 里的纹理名归一到磁盘上的真实文件名（大小写不敏感）。 */
+  resolveTextureName(name) {
+    if (!name) return '';
+    return this.textureNames.get(name.toLowerCase()) || name;
+  }
+
   getMaterial(definition) {
-    const textureName = definition?.texture || '';
+    const textureName = this.resolveTextureName(definition?.texture);
     const key = `${textureName}|${definition?.alphaTestMode || 0}`;
     if (this.materialCache.has(key)) return this.materialCache.get(key);
     let texture = null;
