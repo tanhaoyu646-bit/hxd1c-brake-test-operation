@@ -5,6 +5,10 @@ import { BrakeTestWorkflow } from './brakeTestWorkflow.js';
 import { buildBrakeTestRecord, formatRecordText, buildRecordHtml } from './brakeTestRecord.js';
 
 const $ = (q) => document.querySelector(q);
+// CIR（机车综合无线通信设备）在正面驾驶台上的热区，单位与其它部件一致（640×480 设计坐标）。
+// 范围卡在左侧显示单元的屏幕区域：下沿 324 必须小于自阀 sprite 的 341 与自阀触控区的 326，
+// 否则会盖住自阀导致拖不动。与实物位置不符时只改这一处即可。
+const CIR_HOTSPOT = { x: 4, y: 246, w: 112, h: 78 };
 // 场景可在运行中切换（教师指定 / 考核抽考），因此 attempt、sim、workflow 都是可替换的。
 let attempt = createSimpleBrakeAttempt(location.search);
 let sim = new TrainSimulation(attempt);
@@ -67,6 +71,14 @@ function createFront() {
   // 原 CVF 没有为中部板钮定义鼠标热区；不再用猜测坐标冒充真实按钮。
   // 电气与辅助设备通过右侧经过命名校验的操作按钮控制，车内只保留 CVF 明确定义的复位热区。
   elements.reset=makeHotspot('reset','警惕/复位',386,312,32,32);
+  // 驾驶台上的 CIR 装置：点它打开列尾风压查询（现实中也由 CIR 查询列尾）。
+  const cirButton=document.createElement('button');
+  cirButton.type='button';cirButton.className='cir-hotspot';cirButton.id='cir-hotspot';
+  cirButton.setAttribute('aria-label','CIR 列尾风压查询');
+  cirButton.style.left=pct(CIR_HOTSPOT.x,640);cirButton.style.top=pct(CIR_HOTSPOT.y,480);
+  cirButton.style.width=pct(CIR_HOTSPOT.w,640);cirButton.style.height=pct(CIR_HOTSPOT.h,480);
+  cirButton.addEventListener('click',(event)=>{event.preventDefault();event.stopPropagation();openCir();});
+  overlay.append(cirButton);
   makePhysicalButton('lkj-trigger','放大 LKJ 监控装置',210,226,101,94,(el)=>el.addEventListener('click',openLkj));
   elements.parkingApply=makePhysicalButton('parking-apply','停放制动施加（红）',157,350,21,29);
   elements.parkingRelease=makePhysicalButton('parking-release','停放制动缓解（绿）',179,350,22,29);
@@ -181,7 +193,7 @@ function renderLkj(){
 }
 function openLkj(){if(!lkjRoot)buildLkj();closeSwitchPanel();lkjPhase=sim.state.lkjConfirmed?'done':'boot';lkjDraft=sim.state.lkjData&&!sim.state.lkjData.debug?{...sim.state.lkjData}:{};lkjRoot.classList.add('open');lkjRoot.setAttribute('aria-hidden','false');document.body.classList.add('device-panel-active');lkjStartAudio.currentTime=0;lkjStartAudio.play().catch(()=>{});renderLkj();}
 function closeLkj(){if(!lkjRoot)return;lkjRoot.classList.remove('open');lkjRoot.setAttribute('aria-hidden','true');document.body.classList.remove('device-panel-active');}
-function closeDevicePanels(){closeRecordModal();closeSwitchPanel();closePowerCabinet();closeLkj();if(hornPointerId!==null)stopHorn();else{hornAudio.pause();hornAudio.currentTime=0;if(sim.state.hornActive)command('horn-stop');}}
+function closeDevicePanels(){closeRecordModal();closeCir();closeSwitchPanel();closePowerCabinet();closeLkj();if(hornPointerId!==null)stopHorn();else{hornAudio.pause();hornAudio.currentTime=0;if(sim.state.hornActive)command('horn-stop');}}
 function buildSwitchPanel(){
   const root=document.createElement('div');root.id='switch-panel-modal';root.className='switch-panel-modal';root.setAttribute('aria-hidden','true');
   root.innerHTML=`<div class="switch-panel-shell" role="dialog" aria-modal="true" aria-label="HXD1C板钮面板"><div class="switch-panel-head"><div><strong>板钮面板</strong><span>点击上半区或下半区拨动，板钮保持在所选位置</span></div><button type="button" class="switch-panel-close" aria-label="关闭板钮面板">×</button></div><div class="switch-panel-photo"><img src="./assets/switch-panel/HXD1C-switch-panel-reference.jpg" alt="HXD1C板钮面板实物参考" /><div class="switch-panel-controls"></div></div><div class="switch-panel-status">主断：上合/下分；受电弓：上升/下降；空压机：上投入/下停止。</div></div>`;
@@ -228,7 +240,15 @@ function renderTraining(state,message='') {
     ?(conclusion.pass?'<span class="training-complete">试验合格</span>':'<span class="training-failed">试验完成 · 结论不合格</span>')
     :workflow.phase==='FAILED'?'<span class="training-failed">试验不合格</span>'
     :`第 ${Math.max(1,current+1)} 步`;
-  $('#status').innerHTML=`<strong>状态：</strong>${stateLabel}<div class="status-grid"><span>总风 <b>${state.mainRes.toFixed(0)} kPa</b></span><span>均衡风缸 <b>${state.equalizingRes.toFixed(0)} kPa</b></span><span>列车管 <b>${state.trainPipe.toFixed(0)} kPa</b></span><span>尾部风压 <b>${state.tailPipe.toFixed(0)} kPa</b></span><span>制动缸 <b>${state.brakeCyl.toFixed(0)} kPa</b></span><span>保压剩余 <b>${workflow.phase==='HOLD'?holdRemaining.toFixed(0)+' s':'—'}</b></span></div><div class="hold-progress" style="--hold-progress:${holdPercent}%"><i></i></div>`;
+  // 风压改成画面下层的一排常显条：手机全屏、抽屉收起时也一定看得到。
+  $('#pb-main').textContent=state.mainRes.toFixed(0);
+  $('#pb-equalizing').textContent=state.equalizingRes.toFixed(0);
+  $('#pb-train').textContent=state.trainPipe.toFixed(0);
+  $('#pb-tail').textContent=state.tailPipe.toFixed(0);
+  $('#pb-cyl').textContent=state.brakeCyl.toFixed(0);
+  $('#pb-hold').textContent=workflow.phase==='HOLD'?holdRemaining.toFixed(0)+' s':'—';
+  // 数值已移到下方风压条，抽屉里只留结论状态与保压进度。
+  $('#status').innerHTML=`<strong>状态：</strong>${stateLabel}<div class="hold-progress" style="--hold-progress:${holdPercent}%"><i></i></div>`;
   // 考核模式下不告知注入了哪种故障，只给编组与压力这类学员本来就该知道的信息。
   const summaryTitle=a.exam?'考核模式 · 本轮场景不告知':a.title;
   $('#attempt-summary').innerHTML=`<strong>${summaryTitle}</strong><br>编组 ${a.formationCars} 辆 · 定压 ${a.nominalTrainPipe} kPa · 目标 ${a.targetTrainPipe} kPa${a.debugFast?'<br><span class="tag">调试模式：保压时间已缩短</span>':''}`;
@@ -236,11 +256,24 @@ function renderTraining(state,message='') {
   if(latest){observation.innerHTML=`最近列尾查询：机车端 <b>${latest.head.toFixed(0)}</b> kPa，尾部 <b>${latest.tail.toFixed(0)}</b> kPa，差值 <b>${latest.pressureDifference.toFixed(0)}</b> kPa。<br>${latest.passed?'压力变化对应，列车管贯通。':'压力尚未正常跟随，需要重新查询。'}`;observation.className=`observation ${latest.passed?'pass':'warn'}`;}
   else if(Number.isFinite(workflow.exhaustSeconds)){observation.innerHTML=`本次列车管减压耗时 <b>${workflow.exhaustSeconds.toFixed(1)} 秒</b>。请根据编组和排风时间表完成判断。`;observation.className='observation';}
   else{observation.textContent='尚无测量结果。完成100 kPa减压后将记录排风时间。';observation.className='observation';}
-  $('#judge-exhaust').disabled=!Number.isFinite(workflow.exhaustSeconds)||workflow.phase==='COMPLETE'||workflow.phase==='FAILED';
-  $('#query-tail-brake').disabled=workflow.phase!=='HOLD';
-  $('#confirm-tail-brake').disabled=workflow.phase!=='HOLD'||!workflow.tailBrakeQuery?.passed||workflow.tailBrakeConfirmed;
-  $('#query-tail-release').disabled=workflow.phase!=='RELEASE'||workflow.releaseStart===null;
-  $('#confirm-tail-release').disabled=workflow.phase!=='RELEASE'||!workflow.tailReleaseQuery?.passed||workflow.tailReleaseConfirmed;
+  // 试验操作台与 CIR 面板共用同一批列尾动作，启用条件必须一致，避免两处状态打架。
+  const tailGate={
+    judge:Number.isFinite(workflow.exhaustSeconds)&&workflow.phase!=='COMPLETE'&&workflow.phase!=='FAILED',
+    queryBrake:workflow.phase==='HOLD',
+    confirmBrake:workflow.phase==='HOLD'&&Boolean(workflow.tailBrakeQuery?.passed)&&!workflow.tailBrakeConfirmed,
+    queryRelease:workflow.phase==='RELEASE'&&workflow.releaseStart!==null,
+    confirmRelease:workflow.phase==='RELEASE'&&Boolean(workflow.tailReleaseQuery?.passed)&&!workflow.tailReleaseConfirmed,
+  };
+  $('#judge-exhaust').disabled=!tailGate.judge;
+  $('#query-tail-brake').disabled=!tailGate.queryBrake;
+  $('#confirm-tail-brake').disabled=!tailGate.confirmBrake;
+  $('#query-tail-release').disabled=!tailGate.queryRelease;
+  $('#confirm-tail-release').disabled=!tailGate.confirmRelease;
+  $('#cir-query-brake').disabled=!tailGate.queryBrake;
+  $('#cir-confirm-brake').disabled=!tailGate.confirmBrake;
+  $('#cir-query-release').disabled=!tailGate.queryRelease;
+  $('#cir-confirm-release').disabled=!tailGate.confirmRelease;
+  renderCir(state);
   $('#open-record').disabled=!(workflow.phase==='COMPLETE'||workflow.phase==='FAILED');
   if(message||workflow.message)$('#hint').textContent=message||workflow.message;
   // 流程走完或中止时自动出单一次；结论不合格时把原因直接写到提示栏，避免"完成"被误读为"合格"。
@@ -326,6 +359,46 @@ $('#record-copy').addEventListener('click',async()=>{
   setTimeout(()=>{button.textContent='复制记录单文本';},1800);
 });
 $('#record-print').addEventListener('click',()=>window.print());
+
+// ---------- CIR（机车综合无线通信设备）列尾查询面板 ----------
+function renderCir(state){
+  if(!$('#cir-modal'))return;
+  const latest=(workflow.phase==='RELEASE'||workflow.phase==='COMPLETE')?workflow.tailReleaseQuery:workflow.tailBrakeQuery;
+  $('#cir-head-value').textContent=Math.round(state.trainPipe)+' kPa';
+  $('#cir-tail-value').textContent=Math.round(state.tailPipe)+' kPa';
+  $('#cir-diff-value').textContent=Math.round(Math.abs(state.tailPipe-state.trainPipe))+' kPa';
+  const verdict=$('#cir-verdict');
+  if(latest){
+    verdict.textContent=latest.passed
+      ?`列尾查询通过：压差 ${Math.round(latest.pressureDifference)} kPa，列车管贯通。`
+      :`列尾查询未通过：压差 ${Math.round(latest.pressureDifference)} kPa，尾部尚未正常跟随，请等待后重查。`;
+    verdict.className=`cir-verdict ${latest.passed?'pass':'warn'}`;
+  }else{
+    verdict.textContent='尚未查询';
+    verdict.className='cir-verdict';
+  }
+  $('#cir-hint').textContent=workflow.message||'按下方功能键查询列尾风压';
+}
+function openCir(){closeDevicePanels();renderCir(sim.state);$('#cir-modal').classList.add('open');$('#cir-modal').setAttribute('aria-hidden','false');document.body.classList.add('device-panel-active');}
+function closeCir(){const modal=$('#cir-modal');if(!modal)return;modal.classList.remove('open');modal.setAttribute('aria-hidden','true');document.body.classList.remove('device-panel-active');}
+$('#open-cir').addEventListener('click',openCir);
+$('#cir-close').addEventListener('click',closeCir);
+$('#cir-modal').addEventListener('click',(event)=>{if(event.target===$('#cir-modal'))closeCir();});
+$('#cir-query-brake').addEventListener('click',()=>workflow.queryTail(sim.state,'brake'));
+$('#cir-confirm-brake').addEventListener('click',()=>workflow.confirmTail('brake'));
+$('#cir-query-release').addEventListener('click',()=>workflow.queryTail(sim.state,'release'));
+$('#cir-confirm-release').addEventListener('click',()=>workflow.confirmTail('release'));
+
+// ---------- 右侧可缩进抽屉（流程 / 操作台 / 教学场景） ----------
+// 刻意不做全屏遮罩：抽屉打开时学员还要一边看流程一边操作驾驶台，遮罩会把整个驾驶台挡住。
+function setDrawer(open){
+  const drawer=$('#training-drawer');if(!drawer)return;
+  drawer.classList.toggle('open',open);
+  drawer.setAttribute('aria-hidden',String(!open));
+  $('#drawer-toggle').setAttribute('aria-expanded',String(open));
+}
+$('#drawer-toggle').addEventListener('click',()=>setDrawer(!$('#training-drawer').classList.contains('open')));
+addEventListener('keydown',(event)=>{if(event.key==='Escape')setDrawer(false);});
 $('#query-tail-brake').addEventListener('click',()=>workflow.queryTail(sim.state,'brake'));
 $('#confirm-tail-brake').addEventListener('click',()=>workflow.confirmTail('brake'));
 $('#query-tail-release').addEventListener('click',()=>workflow.queryTail(sim.state,'release'));
