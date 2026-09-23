@@ -1,8 +1,9 @@
 import { TrainSimulation } from './dynamics.js?rev=linear-exhaust-600kpa-v2-20260923';
 import { MstsRouteScene } from './mstsRouteScene.js?rev=texture-case-v9-20260922';
-import { createSimpleBrakeAttempt, EXHAUST_ANSWER_LABELS, SCENARIO_OPTIONS, EXAM_KEY } from './brakeTestScenarios.js?rev=exhaust-formula-v1-20260923';
-import { BrakeTestWorkflow } from './brakeTestWorkflow.js';
-import { buildBrakeTestRecord, formatRecordText, buildRecordHtml } from './brakeTestRecord.js';
+import { createSimpleBrakeAttempt, EXHAUST_ANSWER_LABELS, SCENARIO_OPTIONS, EXAM_KEY, TEST_MODE_OPTIONS } from './brakeTestScenarios.js?rev=all-brake-tests-v2-20260923';
+import { BrakeTestWorkflow } from './brakeTestWorkflow.js?rev=all-brake-tests-v2-20260923';
+import { FullTestWorkflow } from './fullTestWorkflow.js?rev=all-brake-tests-v1-20260923';
+import { buildBrakeTestRecord, formatRecordText, buildRecordHtml } from './brakeTestRecord.js?rev=all-brake-tests-v2-20260923';
 
 const $ = (q) => document.querySelector(q);
 // CIR（机车综合无线通信设备）在正面驾驶台上的热区，单位与其它部件一致（640×480 设计坐标）。
@@ -12,7 +13,11 @@ const CIR_HOTSPOT = { x: 4, y: 246, w: 112, h: 78 };
 // 场景可在运行中切换（教师指定 / 考核抽考），因此 attempt、sim、workflow 都是可替换的。
 let attempt = createSimpleBrakeAttempt(location.search);
 let sim = new TrainSimulation(attempt);
-let workflow = new BrakeTestWorkflow(attempt);
+/** 按试验项目选流程：简略试验与全部试验是两套阶段机，但共用装置、排风公式与记录单骨架。 */
+function createWorkflow(next) {
+  return next.testMode === 'full' ? new FullTestWorkflow(next) : new BrakeTestWorkflow(next);
+}
+let workflow = createWorkflow(attempt);
 const overlay = $('#overlay');
 const routeScene = new MstsRouteScene($('#route-scene'));
 const views = { front: 'HXD1C_front.png', left: 'HXD1C_left_full.png', right: 'HXD1C_right_full.png' };
@@ -234,7 +239,9 @@ function renderTraining(state,message='') {
   const steps=workflow.getSteps(state);const current=steps.findIndex(step=>!step.done);
   const conclusion=workflow.getConclusion(state);
   $('#procedure').innerHTML=steps.map((step,index)=>`<li class="${step.done?'done':index===current?'active current':'blocked'}">${step.label}</li>`).join('');
-  const a=attempt;const holdRemaining=Math.max(0,a.holdDuration-workflow.holdElapsed);const holdPercent=Math.min(100,workflow.holdElapsed/a.holdDuration*100);
+  const a=attempt;const full=a.testMode==='full';
+  const holdRemaining=full?(workflow.holdRemaining??0):Math.max(0,a.holdDuration-workflow.holdElapsed);
+  const holdPercent=full?workflow.holdProgress:Math.min(100,workflow.holdElapsed/a.holdDuration*100);
   // 结论与流程进度分开表达：流程走完不等于试验合格（排风时间异常属于"走完但不合格"）。
   const stateLabel=workflow.phase==='COMPLETE'
     ?(conclusion.pass?'<span class="training-complete">试验合格</span>':'<span class="training-failed">试验完成 · 结论不合格</span>')
@@ -246,20 +253,41 @@ function renderTraining(state,message='') {
   $('#pb-train').textContent=state.trainPipe.toFixed(0);
   $('#pb-tail').textContent=state.tailPipe.toFixed(0);
   $('#pb-cyl').textContent=state.brakeCyl.toFixed(0);
-  $('#pb-hold').textContent=workflow.phase==='HOLD'?holdRemaining.toFixed(0)+' s':'—';
+  $('#pb-hold').textContent=(full?workflow.holdRemaining!==null:workflow.phase==='HOLD')?holdRemaining.toFixed(0)+' s':'—';
   // 数值已移到下方风压条，抽屉里只留结论状态与保压进度。
   $('#status').innerHTML=`<strong>状态：</strong>${stateLabel}<div class="hold-progress" style="--hold-progress:${holdPercent}%"><i></i></div>`;
   // 考核模式下不告知注入了哪种故障，只给编组与压力这类学员本来就该知道的信息。
   const summaryTitle=a.exam?'考核模式 · 本轮场景不告知':a.title;
   // 参考排风时间由车型与编组按公式算出（客车 0.75×辆数×减压量/100；货车 辆数×常数），
-  // 不再写死区间——改编组或换车型时判定基准自动跟着变。
-  $('#attempt-summary').innerHTML=`<strong>${summaryTitle}</strong><br>${a.trainTypeLabel} · 编组 ${a.formationCars} 辆 · 定压 ${a.nominalTrainPipe} kPa · 减压 ${a.targetReduction} kPa<br>参考排风时间 ${a.exhaust.reference} 秒（允许 ${a.exhaust.min} ～ ${a.exhaust.max} 秒）<br><span class="formula-tag">${a.exhaust.formulaText}</span>${a.debugFast?'<br><span class="tag">调试模式：保压与排风均按 1/4 加速，不得作为正式记录</span>':''}`;
-  const observation=$('#observation');const latest=workflow.tailReleaseQuery||workflow.tailBrakeQuery;
-  if(latest){observation.innerHTML=`最近列尾查询：机车端 <b>${latest.head.toFixed(0)}</b> kPa，尾部 <b>${latest.tail.toFixed(0)}</b> kPa，差值 <b>${latest.pressureDifference.toFixed(0)}</b> kPa。<br>${latest.passed?'压力变化对应，列车管贯通。':'压力尚未正常跟随，需要重新查询。'}`;observation.className=`observation ${latest.passed?'pass':'warn'}`;}
-  else if(Number.isFinite(workflow.exhaustSeconds)){observation.innerHTML=`本次列车管减压耗时 <b>${workflow.exhaustSeconds.toFixed(1)} 秒</b>。请根据编组和排风时间表完成判断。`;observation.className='observation';}
-  else{observation.textContent='尚无测量结果。完成100 kPa减压后将记录排风时间。';observation.className='observation';}
-  // 试验操作台与 CIR 面板共用同一批列尾动作，启用条件必须一致，避免两处状态打架。
-  const tailGate={
+  // 不再写死区间——改编组或换车型时判定基准自动跟着变。全部试验要显示感度/安定两档。
+  const exhaustLine=full
+    ? `各档参考排风时间：${a.exhaustByLevel.filter(x=>x.checked&&(x.reduction===50||x.reduction===140)).map(x=>`${x.reduction} kPa → ${x.reference} s`).join(' · ')}`
+    : `参考排风时间 ${a.exhaust.reference} 秒（允许 ${a.exhaust.min} ～ ${a.exhaust.max} 秒）`;
+  $('#attempt-summary').innerHTML=`<strong>${summaryTitle}</strong><br>${a.testModeLabel} · ${a.trainTypeLabel} · 编组 ${a.formationCars} 辆 · 定压 ${a.nominalTrainPipe} kPa${full?'':' · 减压 '+a.targetReduction+' kPa'}<br>${exhaustLine}<br><span class="formula-tag">${a.exhaust.formulaText}</span>${a.debugFast?'<br><span class="tag">调试模式：保压与排风均已加速，不得作为正式记录</span>':''}`;
+  const observation=$('#observation');
+  if(full){
+    // 全部试验按子项列出已测得的排风/排空时间，学员一眼看到进度。
+    const measured=[
+      Number.isFinite(workflow.sensExhaustSeconds)?`感度 50 kPa 排风 <b>${workflow.sensExhaustSeconds.toFixed(1)}</b> s`:'',
+      Number.isFinite(workflow.stabExhaustSeconds)?`安定 140 kPa 排风 <b>${workflow.stabExhaustSeconds.toFixed(1)}</b> s`:'',
+      Number.isFinite(workflow.emergencyExhaustSeconds)?`紧急排空 <b>${workflow.emergencyExhaustSeconds.toFixed(1)}</b> s`:'',
+    ].filter(Boolean);
+    observation.innerHTML=measured.length
+      ?`已测：${measured.join('　｜　')}<br>制动缸 <b>${state.brakeCyl.toFixed(0)}</b> kPa`
+      :'尚未测得排风时间。请按提示依次操作自阀：1 档（感度）→ 3 档（安定）→ 5 档（紧急）→ 运转位。';
+    observation.className='observation';
+  } else {
+    const latest=workflow.tailReleaseQuery||workflow.tailBrakeQuery;
+    if(latest){observation.innerHTML=`最近列尾查询：机车端 <b>${latest.head.toFixed(0)}</b> kPa，尾部 <b>${latest.tail.toFixed(0)}</b> kPa，差值 <b>${latest.pressureDifference.toFixed(0)}</b> kPa。<br>${latest.passed?'压力变化对应，列车管贯通。':'压力尚未正常跟随，需要重新查询。'}`;observation.className=`observation ${latest.passed?'pass':'warn'}`;}
+    else if(Number.isFinite(workflow.exhaustSeconds)){observation.innerHTML=`本次列车管减压耗时 <b>${workflow.exhaustSeconds.toFixed(1)} 秒</b>。请根据编组和排风时间表完成判断。`;observation.className='observation';}
+    else{observation.textContent='尚无测量结果。完成100 kPa减压后将记录排风时间。';observation.className='observation';}
+  }
+  // 列尾风压查询只属于简略试验（《技规》全部试验不含列尾项）；全部试验把这一区整体隐藏，
+  // 学员按阶段提示只操作自阀，界面保持干净。两处入口共用同一批启用条件，避免状态打架。
+  $('#test-actions').hidden=full;
+  const tailGate=full
+    ?{judge:false,queryBrake:false,confirmBrake:false,queryRelease:false,confirmRelease:false}
+    :{
     judge:Number.isFinite(workflow.exhaustSeconds)&&workflow.phase!=='COMPLETE'&&workflow.phase!=='FAILED',
     queryBrake:workflow.phase==='HOLD',
     confirmBrake:workflow.phase==='HOLD'&&Boolean(workflow.tailBrakeQuery?.passed)&&!workflow.tailBrakeConfirmed,
@@ -337,7 +365,9 @@ function renderRecord(){
   const sceneLine=record.header.exam
     ?`场景 <span class="tag">考核抽考</span> · 本轮实际注入：${record.header.scenario}`
     :`场景 ${record.header.scenario}`;
-  $('#record-meta').innerHTML=`试验编号 ${record.header.attemptId}<br>${sceneLine} · ${record.header.trainTypeLabel} · 编组 ${record.header.formationCars} 辆 · 定压 ${record.header.nominalTrainPipe} kPa · 减压量 ${record.header.targetReduction} kPa<br>排风时间依据：${record.header.exhaust.formulaText}<br>开始 ${record.header.createdAt} · 出单 ${record.header.generatedAt}${record.header.debugFast?'<br><span class="tag">调试模式：保压与排风时间均已按 1/4 加速，判定基准同步缩放，不得作为正式记录</span>':''}`;
+  // 全部试验的减压量分散在各子项（50 / 140 kPa），表头只写「见各子项」避免误导。
+  const reductionLine=record.header.testMode==='full'?'（减压量见各子项）':` · 减压量 ${record.header.targetReduction} kPa`;
+  $('#record-meta').innerHTML=`试验编号 ${record.header.attemptId}<br>试验项目 ${record.header.testModeLabel} · ${sceneLine}<br>${record.header.trainTypeLabel} · 编组 ${record.header.formationCars} 辆 · 定压 ${record.header.nominalTrainPipe} kPa${reductionLine}<br>排风时间依据：${record.header.exhaust.formulaText}<br>开始 ${record.header.createdAt} · 出单 ${record.header.generatedAt}${record.header.debugFast?'<br><span class="tag">调试模式：保压与排风时间均已加速，判定基准同步缩放，不得作为正式记录</span>':''}`;
   $('#record-body').innerHTML=html.body;
   $('#record-conclusion').className=`record-conclusion ${record.conclusion.pass?'pass':'bad'}`;
   $('#record-conclusion').innerHTML=html.conclusion;
@@ -425,13 +455,19 @@ function updateCirPressure(dt){
   syncCirPressure();
 }
 function onCirKey(code){
-  if(code==='bt12'){                      // 风压查询
+  if(code==='bt12'||code==='bt9'){
     if(!cirLinked()){setCirNotice('列尾装置未连接：请先按「主控」进入主菜单，选第 6 项输入 6 位列尾号，再查询尾部风压。');return;}
-    syncCirPressure(true);
-    workflow.queryTail(sim.state,workflow.phase==='RELEASE'?'release':'brake');
-  }else if(code==='bt9'){                 // 列尾排风 → 尾部反馈
-    if(!cirLinked()){setCirNotice('列尾装置未连接，无法执行列尾排风试验。');return;}
-    workflow.confirmTail(workflow.phase==='RELEASE'?'release':'brake');
+    // 列尾查询是简略试验的判定项；全部试验不含此项，CIR 只作观察用，不产生任何记录。
+    if(typeof workflow.queryTail!=='function'){
+      setCirNotice('当前为全部试验，列尾风压查询不参与本次判定，CIR 仅用于观察尾部风压。');
+      return;
+    }
+    if(code==='bt12'){
+      syncCirPressure(true);
+      workflow.queryTail(sim.state,workflow.phase==='RELEASE'?'release':'brake');
+    }else{
+      workflow.confirmTail(workflow.phase==='RELEASE'?'release':'brake');
+    }
   }else if(code==='bt10'){                // 列尾销号
     setCirNotice('列尾装置已销号，尾部风压不再可靠。');
   }
@@ -494,9 +530,22 @@ function buildScenarioPicker(){
   warning.hidden=false;
   warning.textContent=`地址参数 ?scenario=${attempt.requestedScenario} 不是有效场景，已按「正常 · 标准编组」运行。可用值：${keys}，或 ${EXAM_KEY}（考核抽考）。`;
 }
+/** 试验项目切换（简略试验 / 全部试验）。两套阶段机不同，切换即按同一场景开新一轮。 */
+function buildTestModePicker(){
+  document.querySelectorAll('.test-mode-picker button').forEach(button=>{
+    const active=button.dataset.mode===attempt.testMode;
+    button.classList.toggle('active',active);
+    button.setAttribute('aria-pressed',String(active));
+  });
+}
+document.querySelectorAll('.test-mode-picker button').forEach(button=>{
+  button.addEventListener('click',()=>{
+    if(button.dataset.mode===attempt.testMode)return;
+    startAttempt(createSimpleBrakeAttempt(location.search,{scenario:attempt.scenarioKey,exam:attempt.exam,trainType:attempt.trainType,testMode:button.dataset.mode}));
+  });
+});
 /** 客车 / 货车切换。换车型要用对应公式重算参考排风时间，因此等价于按同一场景开新一轮。 */
-function buildTrainTypePicker(){
-  document.querySelectorAll('.train-type-picker button').forEach(button=>{
+function buildTrainTypePicker(){  document.querySelectorAll('.train-type-picker button').forEach(button=>{
     const active=button.dataset.type===attempt.trainType;
     button.classList.toggle('active',active);
     button.setAttribute('aria-pressed',String(active));
@@ -513,7 +562,7 @@ function startAttempt(next){
   closeAnswerModal();closeDevicePanels();
   attempt=next;
   sim=new TrainSimulation(attempt);
-  workflow=new BrakeTestWorkflow(attempt);
+  workflow=createWorkflow(attempt);
   sim.onChange(render);
   workflow.onChange(()=>renderTraining(sim.state));
   recordAutoShown=false;
@@ -522,17 +571,19 @@ function startAttempt(next){
   cirDelayedPressure=null;
   cirNotice='';
   buildScenarioPicker();
+  buildTestModePicker();
   buildTrainTypePicker();
   setView('front');
 }
 $('#scenario-select')?.addEventListener('change',(event)=>{
   const isExam=event.target.value===EXAM_KEY;
   // 选「考核抽考」就现场抽一种：抽到什么在记录单出来之前都不显示给学员。
-  startAttempt(createSimpleBrakeAttempt(location.search,{scenario:isExam?EXAM_KEY:event.target.value,exam:isExam}));
+  // 车型与试验项目必须沿用当前选择，否则换场景会把它们悄悄重置回默认值。
+  startAttempt(createSimpleBrakeAttempt(location.search,{scenario:isExam?EXAM_KEY:event.target.value,exam:isExam,trainType:attempt.trainType,testMode:attempt.testMode}));
 });
 $('#restart-test').addEventListener('click',()=>{
-  // 重新开始本轮试验沿用本轮已定的场景（含抽考已抽到的那一种），不重新抽签。
-  startAttempt(createSimpleBrakeAttempt(location.search,{scenario:attempt.scenarioKey,exam:attempt.exam}));
+  // 重新开始本轮试验沿用本轮已定的场景（含抽考已抽到的那一种）、车型与试验项目，不重新抽签。
+  startAttempt(createSimpleBrakeAttempt(location.search,{scenario:attempt.scenarioKey,exam:attempt.exam,trainType:attempt.trainType,testMode:attempt.testMode}));
 });
 buildScenarioPicker();
 // 调试与自动化验收接口（只读，不影响教学逻辑）。
@@ -550,4 +601,4 @@ addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement&&documen
 addEventListener('orientationchange',()=>{closeDevicePanels();setTimeout(()=>routeScene.resize(),160);});
 window.visualViewport?.addEventListener('resize',()=>routeScene.resize());
 addEventListener('pointerup',stopHorn,true);addEventListener('pointercancel',stopHorn,true);addEventListener('blur',()=>stopHorn());addEventListener('pagehide',()=>stopHorn());document.addEventListener('visibilitychange',()=>{if(document.hidden)stopHorn();});
-document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>setView(b.dataset.view)));buildSwitchPanel();buildLkj();buildKeys();bindDrag();buildTrainTypePicker();setView('front');sim.onChange(render);workflow.onChange(()=>renderTraining(sim.state));let last=performance.now();function loop(now){const dt=Math.min(.05,(now-last)/1000);sim.tick(dt);workflow.update(sim.state,dt);updateCirPressure(dt);routeScene.render();last=now;requestAnimationFrame(loop)}requestAnimationFrame(loop);
+document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>setView(b.dataset.view)));buildSwitchPanel();buildLkj();buildKeys();bindDrag();buildTestModePicker();buildTrainTypePicker();setView('front');sim.onChange(render);workflow.onChange(()=>renderTraining(sim.state));let last=performance.now();function loop(now){const dt=Math.min(.05,(now-last)/1000);sim.tick(dt);workflow.update(sim.state,dt);updateCirPressure(dt);routeScene.render();last=now;requestAnimationFrame(loop)}requestAnimationFrame(loop);

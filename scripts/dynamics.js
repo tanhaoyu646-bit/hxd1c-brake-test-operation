@@ -1,5 +1,24 @@
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
+/**
+ * 列车管排风与制动缸标定（货车，列车管定压 600 kPa）。数值集中在这里便于按教学要求调整。
+ *
+ * - 均衡风缸与列车管必须**同速**下降：实车上均衡风缸是自阀控制的先导压力，
+ *   经中继阀使列车管降压，两者变化幅度与速度基本一致。此前均衡风缸按一阶快趋近
+ *   （约 0.4 秒到位）而列车管要几十秒，界面上看起来不像同一套制动系统。
+ * - 列车管跟随均衡风缸留 FOLLOW_TAU 的滞后（阀件响应），稳态偏置约 τ×速率（1 kPa 量级），
+ *   恰好被判定用的 1 kPa 容差抵消，因此「列车管达到目标 ±1 kPa」的时刻仍等于参考表的 T。
+ * - 紧急制动不是"瞬间排空"，实测约 4~5 秒把列车管放到 0。
+ * - 制动缸压力与列车管减压量近似成正比，定压 600 kPa 下最高约 450 kPa。
+ */
+const FOLLOW_TAU_FULL = 0.4;
+// 紧急制动时均衡风缸与列车管串了两级一阶滞后（先导 → 中继阀），总排空时间约为 5.4×τ。
+// 取 τ=0.8 使列车管约 4.3 秒排到 0（此前 τ=1.2 会因为串联滞后变成 6.5 秒，超出判定上限）。
+// 该常数不随调试加速缩放——紧急制动排空是真实物理时间。
+const EMERGENCY_TAU = 0.8;
+const BRAKE_CYL_RATIO = 3.2;
+const BRAKE_CYL_MAX = 450;
+
 export class TrainSimulation {
   constructor(config = {}) {
     this.config = {
@@ -117,26 +136,42 @@ export class TrainSimulation {
     const equalizingTargets = reductions.map((reduction) => Math.max(0, nominal - reduction));
     const equalizingTarget = s.mainRes > 450 ? equalizingTargets[s.autoBrake] : 0;
     const emergencyBrake = s.autoBrake >= 5;
-    s.equalizingRes += (equalizingTarget - s.equalizingRes) * Math.min(1, dt * (emergencyBrake ? 5.5 : s.autoBrake > 0 ? 2.4 : .75));
-    if (s.autoBrake > 0 && !emergencyBrake) s.pneumaticLeak += this.config.simulatedLeakagePerMinute / 60 * dt;
-    else s.pneumaticLeak += (0 - s.pneumaticLeak) * Math.min(1, dt * 2);
-    const trainPipeTarget = Math.max(0, s.equalizingRes - s.pneumaticLeak);
-    // 列车管排风按「线性泄流」处理：在参考排风时间 T 内走完规定减压量。
-    // 参考表本身就是「辆数 × 常数 = T」的线性关系，用线性速率与之一致；
-    // 原先按一阶指数拟合（rate = 4.6/T）在长排风时间下会撞到速率下限
-    // （货运 60 辆可达 60 s），实际到不了规定时间。
-    const exhaustSeconds = Math.max(1, this.config.simulatedExhaustSeconds);
-    const exhaustStep = this.config.targetReduction / exhaustSeconds;
+    // 本档的排风速率（kPa/s），由参考表按「本次减压量」算出的排风时间反推：
+    // 50 kPa 约 24 s、100 kPa 约 38.4 s、140 kPa 约 48 s（48 辆货车），紧急档单独给定。
+    const exhaustRate = this.config.exhaustRates?.[s.autoBrake]
+      || (this.config.targetReduction / Math.max(1, this.config.simulatedExhaustSeconds));
+    const reducing = s.autoBrake > 0 && equalizingTarget < s.equalizingRes;
+
     if (emergencyBrake) {
-      s.trainPipe += (trainPipeTarget - s.trainPipe) * Math.min(1, dt * 4.2);
-    } else if (s.autoBrake > 0) {
-      s.trainPipe = Math.max(trainPipeTarget, s.trainPipe - exhaustStep * dt);
+      s.equalizingRes += (equalizingTarget - s.equalizingRes) * Math.min(1, dt / EMERGENCY_TAU);
+    } else if (reducing && exhaustRate > 0) {
+      // 减压时均衡风缸线性下降——它与列车管是同一套制动作用，不能一个秒变一个慢慢降。
+      s.equalizingRes = Math.max(equalizingTarget, s.equalizingRes - exhaustRate * dt);
+    } else {
+      s.equalizingRes += (equalizingTarget - s.equalizingRes) * Math.min(1, dt * .75);
+    }
+    // 管路漏泄只在保压/静止阶段累积。若排风过程中同时计入漏泄，注入"保压漏泄"的场景会连带
+    // 把排风时间也判成过短（48 辆货车 28 kPa/min 会提前约 7 秒），学员看到两个不合格原因
+    // 反而分不清问题出在哪个环节；参考表的排风时间基准也是正常状态下的列车。
+    if (s.autoBrake > 0 && !emergencyBrake && !reducing) {
+      s.pneumaticLeak += this.config.simulatedLeakagePerMinute / 60 * dt;
+    } else if (!reducing) {
+      s.pneumaticLeak += (0 - s.pneumaticLeak) * Math.min(1, dt * 2);
+    }
+    const trainPipeTarget = Math.max(0, s.equalizingRes - s.pneumaticLeak);
+    // 列车管经中继阀跟随均衡风缸：减压与紧急用对应的时间常数，缓解充风仍按原一阶速率。
+    // 滞后常数随调试加速同步缩放，保证加速模式下判定时间仍与参考表吻合。
+    const followTau = this.config.followTau ?? FOLLOW_TAU_FULL;
+    if (emergencyBrake) {
+      s.trainPipe += (trainPipeTarget - s.trainPipe) * Math.min(1, dt / EMERGENCY_TAU);
+    } else if (reducing) {
+      s.trainPipe += (trainPipeTarget - s.trainPipe) * Math.min(1, dt / followTau);
     } else {
       s.trainPipe += (trainPipeTarget - s.trainPipe) * Math.min(1, dt * .72);
     }
     s.tailPipe += (s.trainPipe - s.tailPipe) * Math.min(1, dt * this.config.tailResponseRate);
     // 停放制动为独立的弹簧储能制动，不应冒充空气制动缸压力；否则大闸缓解试验会永远无法完成。
-    const autoCyl = s.mainRes > 450 ? clamp((nominal - s.trainPipe) * 1.27, 0, 350) : 0; const individualCyl = s.independentBrake * 60;
+    const autoCyl = s.mainRes > 450 ? clamp((nominal - s.trainPipe) * BRAKE_CYL_RATIO, 0, BRAKE_CYL_MAX) : 0; const individualCyl = s.independentBrake * 60;
     const cylTarget = Math.max(autoCyl, individualCyl); s.brakeCyl += (cylTarget - s.brakeCyl) * Math.min(1, dt * 2.3);
     if (s.brakeTested && s.autoBrake === 0 && s.trainPipe > nominal - 30 && s.brakeCyl < 40) s.releaseObserved = true;
     const tractionAllowed = s.mainBreaker && s.authority && s.horn && s.headlight && s.direction === 'F' && !s.parkingBrake && s.autoBrake === 0 && s.independentBrake === 0 && s.brakeCyl < 15;

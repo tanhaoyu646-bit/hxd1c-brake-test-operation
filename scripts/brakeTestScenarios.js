@@ -117,6 +117,106 @@ export function buildExhaustReference(trainTypeKey, cars, reduction, scale = 1) 
   };
 }
 
+/** 自阀各制动位对应的列车管减压量（必须与 dynamics.js 的 reductions 保持一致）。 */
+export function levelReductions(nominalTrainPipe, targetReduction) {
+  return [0, 50, targetReduction, 140, 170, nominalTrainPipe];
+}
+
+/**
+ * 每一档的参考排风时间与判定区间。
+ *
+ * 感度试验（50 kPa）、简略试验（100 kPa）、安定试验（140 kPa）**用同一张参考表**算出，
+ * 不是另设一套数值：货车 48 辆分别是 24.0 / 38.4 / 48.0 秒。
+ *
+ * 判定区间只随「调试加速 timeScale」缩放，**不随场景倍率缩放**——
+ * 否则注入"排风过短"时基准也跟着变快，异常就被判成正常了。
+ */
+export function buildExhaustByLevel(trainTypeKey, cars, nominalTrainPipe, targetReduction, timeScale) {
+  const type = TRAIN_TYPES[resolveTrainType(trainTypeKey)];
+  return levelReductions(nominalTrainPipe, targetReduction).map((reduction, index) => {
+    if (index === 0 || reduction <= 0) {
+      return { level: index, reduction: 0, reference: 0, min: 0, max: 0, tolerance: 0, checked: true };
+    }
+    if (index === 5) {
+      // 紧急制动不按参考表判定排风时间，由紧急排空过程单独判定。
+      return { level: index, reduction, reference: null, min: null, max: null, tolerance: null, checked: false };
+    }
+    const reference = type.referenceSeconds(cars, reduction);
+    const scaled = reference * timeScale;
+    const tolerance = Math.max(scaled * 0.1, 2 * timeScale);
+    return {
+      level: index,
+      reduction,
+      reference: round1(reference),
+      tolerance: round1(tolerance),
+      min: round1(scaled - tolerance),
+      max: round1(scaled + tolerance),
+      checked: true,
+    };
+  });
+}
+
+/** 试验项目：简略试验 / 全部试验（充风缓解 + 感度 + 安定 + 紧急制动）。 */
+export const TEST_MODES = {
+  simple: { key: 'simple', label: '简略试验', title: '列车自动制动机简略试验' },
+  full: { key: 'full', label: '全部试验', title: '列车自动制动机全部试验' },
+};
+
+export const DEFAULT_TEST_MODE = 'simple';
+
+export const TEST_MODE_OPTIONS = [
+  { key: 'simple', label: '简略试验' },
+  { key: 'full', label: '全部试验' },
+];
+
+export function resolveTestMode(raw) {
+  return TEST_MODES[raw] ? raw : DEFAULT_TEST_MODE;
+}
+
+export function testModeLabel(key) {
+  return (TEST_MODES[key] || TEST_MODES[DEFAULT_TEST_MODE]).label;
+}
+
+/**
+ * 全部试验四个子项的判定规格（货车，列车管定压 600 kPa）。
+ *
+ * 判定值按常用教学口径设定，集中在这里便于按本校教材调整：
+ * 制动缸压力与减压量成正比（3.2 kPa / kPa，上限 450），故
+ * 感度 50 kPa → 160 kPa、安定 140 kPa → 448 kPa、紧急 → 450 kPa。
+ */
+export const FULL_TEST_SPEC = {
+  charge: {
+    label: '充风缓解试验',
+    maxBrakeCyl: 15,
+  },
+  sensitivity: {
+    label: '感度试验',
+    level: 1,
+    reduction: 50,
+    minBrakeCyl: 100,
+    holdDuration: 60,
+    maxHoldDrop: 12,
+  },
+  stability: {
+    label: '安定试验',
+    level: 3,
+    reduction: 140,
+    minBrakeCyl: 380,
+    holdDuration: 60,
+    maxHoldDrop: 25,
+  },
+  emergency: {
+    label: '紧急制动试验',
+    level: 5,
+    maxExhaustSeconds: 6,
+    minBrakeCyl: 400,
+    maxBrakeCylSeconds: 9,
+  },
+  release: {
+    maxBrakeCyl: 15,
+  },
+};
+
 const BASE_SCENARIO = {
   id: 'simple-normal-48',
   title: '简略试验 · 标准编组',
@@ -226,9 +326,22 @@ export function createSimpleBrakeAttempt(search = '', overrides = {}) {
 
   const source = SCENARIOS[key] || BASE_SCENARIO;
   const trainTypeKey = resolveTrainType(overrides.trainType ?? params.get('type'));
+  const testModeKey = resolveTestMode(overrides.testMode ?? params.get('test'));
   const formationCars = Number(overrides.formationCars ?? source.formationCars);
   const timeScale = debugFast ? DEBUG_TIME_SCALE : 1;
   const exhaust = buildExhaustReference(trainTypeKey, formationCars, source.targetReduction, timeScale);
+  const exhaustByLevel = buildExhaustByLevel(trainTypeKey, formationCars, source.nominalTrainPipe, source.targetReduction, timeScale);
+
+  // 各制动位的排风速率（kPa/s）：由参考表按该档减压量算出的排风时间反推，
+  // 并乘场景倍率（注入"排风过短/过长"时整机排风特性改变）与调试加速。
+  const type = TRAIN_TYPES[trainTypeKey];
+  const exhaustRates = levelReductions(source.nominalTrainPipe, source.targetReduction).map((reduction, index) => {
+    if (index === 0 || index === 5 || reduction <= 0) return 0;
+    const seconds = type.referenceSeconds(formationCars, reduction) * source.exhaustScale * timeScale;
+    return seconds > 0 ? reduction / seconds : 0;
+  });
+
+  const holdDuration = debugFast ? 6 : source.holdDuration;
 
   return {
     ...source,
@@ -236,20 +349,26 @@ export function createSimpleBrakeAttempt(search = '', overrides = {}) {
     scenarioKey: key,
     trainType: trainTypeKey,
     trainTypeLabel: exhaust.trainTypeLabel,
+    testMode: testModeKey,
+    testModeLabel: TEST_MODES[testModeKey].label,
     exam: Boolean(exam),
     requestedScenario: resolved.requested,
     scenarioValid: resolved.valid,
-    attemptId: `${source.id}-${Date.now().toString(36)}`,
+    attemptId: `${testModeKey}-${source.id}-${Date.now().toString(36)}`,
     createdAt: new Date().toISOString(),
     debugFast,
     timeScale,
     targetTrainPipe: source.nominalTrainPipe - source.targetReduction,
+    /** 列车管跟随均衡风缸的滞后常数，随调试加速缩放（正式 0.4 s）。 */
+    followTau: 0.4 * timeScale,
     exhaust,
+    exhaustByLevel,
+    exhaustRates,
     /** 参考表算出的本车排风时间（× 场景倍率 × 调试加速），供物理与评分使用 */
     simulatedExhaustSeconds: Math.max(1, exhaust.reference * source.exhaustScale * timeScale),
     /** 判定区间（已含加速），保留 {min,max} 结构供 classifyExhaustTime 使用 */
     expectedExhaustSeconds: { min: exhaust.min, max: exhaust.max },
-    holdDuration: debugFast ? 6 : source.holdDuration,
+    holdDuration,
   };
 }
 
