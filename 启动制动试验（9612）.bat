@@ -20,11 +20,15 @@ for /f "tokens=2 delims=:" %%a in ('ipconfig ^| findstr /i "IPv4"') do (
   endlocal
 )
 echo.
-echo   可选场景参数（直接在地址后追加）:
-echo       ?debug=1            保压缩短为 6 秒（开发调试用）
+echo   可选参数（直接在地址后追加，可叠加）:
+echo       ?type=passenger     按客车公式算排风时间（默认货车）
+echo       ?debug=1            保压与排风均按 1/4 加速（开发调试用）
 echo       ?scenario=short     排风时间过短（尾部响应迟缓）
 echo       ?scenario=long      排风时间过长
 echo       ?scenario=leak      保压漏泄超限
+echo       ?scenario=exam      考核抽考（随机抽一种，考试中不告知）
+echo.
+echo   例: http://localhost:%PORT%/index.html?type=passenger^&debug=1
 echo.
 echo   按 Ctrl+C 停止服务
 echo ============================================================
