@@ -3,9 +3,9 @@ const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 export class TrainSimulation {
   constructor(config = {}) {
     this.config = {
-      nominalTrainPipe: 500,
+      nominalTrainPipe: 600,
       targetReduction: 100,
-      simulatedExhaustSeconds: 8,
+      simulatedExhaustSeconds: 38.4,
       tailResponseRate: .34,
       simulatedLeakagePerMinute: 8,
       ...config,
@@ -121,10 +121,19 @@ export class TrainSimulation {
     if (s.autoBrake > 0 && !emergencyBrake) s.pneumaticLeak += this.config.simulatedLeakagePerMinute / 60 * dt;
     else s.pneumaticLeak += (0 - s.pneumaticLeak) * Math.min(1, dt * 2);
     const trainPipeTarget = Math.max(0, s.equalizingRes - s.pneumaticLeak);
-    // 一阶压力响应到达目标值约 1% 范围需要约 4.6 个时间常数。
-    const exhaustRate = Math.max(.08, 4.6 / Math.max(1, this.config.simulatedExhaustSeconds));
-    const trainPipeRate = emergencyBrake ? 4.2 : s.autoBrake > 0 ? exhaustRate : .72;
-    s.trainPipe += (trainPipeTarget - s.trainPipe) * Math.min(1, dt * trainPipeRate);
+    // 列车管排风按「线性泄流」处理：在参考排风时间 T 内走完规定减压量。
+    // 参考表本身就是「辆数 × 常数 = T」的线性关系，用线性速率与之一致；
+    // 原先按一阶指数拟合（rate = 4.6/T）在长排风时间下会撞到速率下限
+    // （货运 60 辆可达 60 s），实际到不了规定时间。
+    const exhaustSeconds = Math.max(1, this.config.simulatedExhaustSeconds);
+    const exhaustStep = this.config.targetReduction / exhaustSeconds;
+    if (emergencyBrake) {
+      s.trainPipe += (trainPipeTarget - s.trainPipe) * Math.min(1, dt * 4.2);
+    } else if (s.autoBrake > 0) {
+      s.trainPipe = Math.max(trainPipeTarget, s.trainPipe - exhaustStep * dt);
+    } else {
+      s.trainPipe += (trainPipeTarget - s.trainPipe) * Math.min(1, dt * .72);
+    }
     s.tailPipe += (s.trainPipe - s.tailPipe) * Math.min(1, dt * this.config.tailResponseRate);
     // 停放制动为独立的弹簧储能制动，不应冒充空气制动缸压力；否则大闸缓解试验会永远无法完成。
     const autoCyl = s.mainRes > 450 ? clamp((nominal - s.trainPipe) * 1.27, 0, 350) : 0; const individualCyl = s.independentBrake * 60;

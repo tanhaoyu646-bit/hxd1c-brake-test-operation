@@ -337,12 +337,16 @@ export class BrakeTestWorkflow {
       {
         label: '排风时间',
         actual: Number.isFinite(this.exhaustSeconds) ? `${this.exhaustSeconds.toFixed(1)} s` : '未测得',
-        reference: `${a.expectedExhaustSeconds.min} ～ ${a.expectedExhaustSeconds.max} s`,
+        // 调试加速时参考值必须与判定区间同口径，否则会出现"实测 9.5 s、
+        // 参考 38.4 s、却判合格"的自相矛盾表述。
+        reference: a.exhaust.scale === 1
+          ? `${a.exhaust.min} ～ ${a.exhaust.max} s（参考 ${a.exhaust.reference} ± ${a.exhaust.tolerance} s）`
+          : `${a.exhaust.min} ～ ${a.exhaust.max} s（调试加速 1/${Math.round(1 / a.exhaust.scale)}：参考 ${a.exhaust.reference} ± ${a.exhaust.tolerance} s 已同步缩放）`,
         verdict: exhaustVerdict === 'normal' ? 'pass' : exhaustVerdict === 'unknown' ? 'pending' : 'fail',
         note: exhaustVerdict === 'short'
-          ? '实测值低于参考下限，可能存在折角塞门关闭或制动主管不畅，应检查列车管贯通状态'
+          ? `实测值低于参考下限。按${a.trainTypeLabel}公式（${a.exhaust.formulaText}），编组 ${a.formationCars} 辆、减压 ${a.targetReduction} kPa 应为 ${a.exhaust.reference} s；排风过快可能是折角塞门关闭或制动主管不畅，应检查列车管贯通状态`
           : exhaustVerdict === 'long'
-            ? '实测值高于参考上限，与编组不符，可能存在漏泄或车列连接异常，应检查制动主管与车列编组'
+            ? `实测值高于参考上限。按${a.trainTypeLabel}公式（${a.exhaust.formulaText}），编组 ${a.formationCars} 辆、减压 ${a.targetReduction} kPa 应为 ${a.exhaust.reference} s；排风过慢可能是漏泄或车列连接异常，应检查制动主管与车列编组`
             : '',
       },
       {

@@ -1,6 +1,6 @@
-import { TrainSimulation } from './dynamics.js?rev=simple-brake-test-v1-20260922';
+import { TrainSimulation } from './dynamics.js?rev=linear-exhaust-600kpa-v2-20260923';
 import { MstsRouteScene } from './mstsRouteScene.js?rev=texture-case-v9-20260922';
-import { createSimpleBrakeAttempt, EXHAUST_ANSWER_LABELS, SCENARIO_OPTIONS, EXAM_KEY } from './brakeTestScenarios.js';
+import { createSimpleBrakeAttempt, EXHAUST_ANSWER_LABELS, SCENARIO_OPTIONS, EXAM_KEY } from './brakeTestScenarios.js?rev=exhaust-formula-v1-20260923';
 import { BrakeTestWorkflow } from './brakeTestWorkflow.js';
 import { buildBrakeTestRecord, formatRecordText, buildRecordHtml } from './brakeTestRecord.js';
 
@@ -251,7 +251,9 @@ function renderTraining(state,message='') {
   $('#status').innerHTML=`<strong>状态：</strong>${stateLabel}<div class="hold-progress" style="--hold-progress:${holdPercent}%"><i></i></div>`;
   // 考核模式下不告知注入了哪种故障，只给编组与压力这类学员本来就该知道的信息。
   const summaryTitle=a.exam?'考核模式 · 本轮场景不告知':a.title;
-  $('#attempt-summary').innerHTML=`<strong>${summaryTitle}</strong><br>编组 ${a.formationCars} 辆 · 定压 ${a.nominalTrainPipe} kPa · 目标 ${a.targetTrainPipe} kPa${a.debugFast?'<br><span class="tag">调试模式：保压时间已缩短</span>':''}`;
+  // 参考排风时间由车型与编组按公式算出（客车 0.75×辆数×减压量/100；货车 辆数×常数），
+  // 不再写死区间——改编组或换车型时判定基准自动跟着变。
+  $('#attempt-summary').innerHTML=`<strong>${summaryTitle}</strong><br>${a.trainTypeLabel} · 编组 ${a.formationCars} 辆 · 定压 ${a.nominalTrainPipe} kPa · 减压 ${a.targetReduction} kPa<br>参考排风时间 ${a.exhaust.reference} 秒（允许 ${a.exhaust.min} ～ ${a.exhaust.max} 秒）<br><span class="formula-tag">${a.exhaust.formulaText}</span>${a.debugFast?'<br><span class="tag">调试模式：保压与排风均按 1/4 加速，不得作为正式记录</span>':''}`;
   const observation=$('#observation');const latest=workflow.tailReleaseQuery||workflow.tailBrakeQuery;
   if(latest){observation.innerHTML=`最近列尾查询：机车端 <b>${latest.head.toFixed(0)}</b> kPa，尾部 <b>${latest.tail.toFixed(0)}</b> kPa，差值 <b>${latest.pressureDifference.toFixed(0)}</b> kPa。<br>${latest.passed?'压力变化对应，列车管贯通。':'压力尚未正常跟随，需要重新查询。'}`;observation.className=`observation ${latest.passed?'pass':'warn'}`;}
   else if(Number.isFinite(workflow.exhaustSeconds)){observation.innerHTML=`本次列车管减压耗时 <b>${workflow.exhaustSeconds.toFixed(1)} 秒</b>。请根据编组和排风时间表完成判断。`;observation.className='observation';}
@@ -269,11 +271,9 @@ function renderTraining(state,message='') {
   $('#confirm-tail-brake').disabled=!tailGate.confirmBrake;
   $('#query-tail-release').disabled=!tailGate.queryRelease;
   $('#confirm-tail-release').disabled=!tailGate.confirmRelease;
-  $('#cir-query-brake').disabled=!tailGate.queryBrake;
-  $('#cir-confirm-brake').disabled=!tailGate.confirmBrake;
-  $('#cir-query-release').disabled=!tailGate.queryRelease;
-  $('#cir-confirm-release').disabled=!tailGate.confirmRelease;
-  renderCir(state);
+  // CIR 面板内的按键判定见 syncCirBridge()：还要结合 iframe 内「列尾是否已连接」，
+  // 不能只按阶段决定，否则会出现"没连列尾也能查风压"的假操作。
+  syncCirHint();
   $('#open-record').disabled=!(workflow.phase==='COMPLETE'||workflow.phase==='FAILED');
   if(message||workflow.message)$('#hint').textContent=message||workflow.message;
   // 流程走完或中止时自动出单一次；结论不合格时把原因直接写到提示栏，避免"完成"被误读为"合格"。
@@ -337,7 +337,7 @@ function renderRecord(){
   const sceneLine=record.header.exam
     ?`场景 <span class="tag">考核抽考</span> · 本轮实际注入：${record.header.scenario}`
     :`场景 ${record.header.scenario}`;
-  $('#record-meta').innerHTML=`试验编号 ${record.header.attemptId}<br>${sceneLine} · 编组 ${record.header.formationCars} 辆 · 定压 ${record.header.nominalTrainPipe} kPa · 减压量 ${record.header.targetReduction} kPa<br>开始 ${record.header.createdAt} · 出单 ${record.header.generatedAt}${record.header.debugFast?'<br><span class="tag">调试模式：保压时间已缩短，不得作为正式记录</span>':''}`;
+  $('#record-meta').innerHTML=`试验编号 ${record.header.attemptId}<br>${sceneLine} · ${record.header.trainTypeLabel} · 编组 ${record.header.formationCars} 辆 · 定压 ${record.header.nominalTrainPipe} kPa · 减压量 ${record.header.targetReduction} kPa<br>排风时间依据：${record.header.exhaust.formulaText}<br>开始 ${record.header.createdAt} · 出单 ${record.header.generatedAt}${record.header.debugFast?'<br><span class="tag">调试模式：保压与排风时间均已按 1/4 加速，判定基准同步缩放，不得作为正式记录</span>':''}`;
   $('#record-body').innerHTML=html.body;
   $('#record-conclusion').className=`record-conclusion ${record.conclusion.pass?'pass':'bad'}`;
   $('#record-conclusion').innerHTML=html.conclusion;
@@ -361,33 +361,114 @@ $('#record-copy').addEventListener('click',async()=>{
 $('#record-print').addEventListener('click',()=>window.print());
 
 // ---------- CIR（机车综合无线通信设备）列尾查询面板 ----------
-function renderCir(state){
-  if(!$('#cir-modal'))return;
-  const latest=(workflow.phase==='RELEASE'||workflow.phase==='COMPLETE')?workflow.tailReleaseQuery:workflow.tailBrakeQuery;
-  $('#cir-head-value').textContent=Math.round(state.trainPipe)+' kPa';
-  $('#cir-tail-value').textContent=Math.round(state.tailPipe)+' kPa';
-  $('#cir-diff-value').textContent=Math.round(Math.abs(state.tailPipe-state.trainPipe))+' kPa';
-  const verdict=$('#cir-verdict');
-  if(latest){
-    verdict.textContent=latest.passed
-      ?`列尾查询通过：压差 ${Math.round(latest.pressureDifference)} kPa，列车管贯通。`
-      :`列尾查询未通过：压差 ${Math.round(latest.pressureDifference)} kPa，尾部尚未正常跟随，请等待后重查。`;
-    verdict.className=`cir-verdict ${latest.passed?'pass':'warn'}`;
-  }else{
-    verdict.textContent='尚未查询';
-    verdict.className='cir-verdict';
-  }
-  $('#cir-hint').textContent=workflow.message||'按下方功能键查询列尾风压';
+// 面板内嵌 CIR 模拟器（assets/cir/CIR-simulator.html）。该模拟器自身的风压是写死的常量
+// （列尾排风键固定给 500、销号固定清零），所以必须由本项目把列车制动机模拟的实时尾压
+// 灌进去，CIR 才有教学意义：
+//   · 每帧把尾部风压按 1~3 秒惯性滞后写入 CIR 的 mmiinfo[3]，最终值与下方风压条完全一致
+//   · 学员在 CIR 上按「风压查询」(bt12) → 查询尾部风压；按「列尾排风」(bt9) → 尾部反馈
+//   · 列尾未连接就按键不产生任何记录，并提示先输入 6 位列尾号（对应实车操作顺序）
+const CIR_SRC='./assets/cir/CIR-simulator.html';
+const CIR_RENDER_WIDTH=918;   // CIR 面板宽高比固定为 1.53（其内部按 innerHeight 自适应）
+const CIR_RENDER_HEIGHT=600;
+const CIR_LOCO_NO='H1234';    // 播报用的机车号（CIR 取第 1~4 位逐位播报数字）
+let cirBridgeReady=false;
+let cirDelayedPressure=null;
+let cirPressureLag=2;
+let cirNotice='';
+let cirNoticeTimer=null;
+
+function cirWindow(){const frame=$('#cir-frame');try{return frame&&frame.contentWindow?frame.contentWindow:null;}catch{return null;}}
+function cirLinked(){const w=cirWindow();try{return Boolean(w&&w.mmiinfo&&String(w.mmiinfo[1]||'').length>1);}catch{return false;}}
+/** 固定按 918×600 渲染再用 transform 缩放塞进容器，保证 CIR 内部排版不变形。 */
+function fitCirFrame(){
+  const wrap=document.querySelector('.cir-frame-wrap');if(!wrap)return;
+  const rect=wrap.getBoundingClientRect();if(!rect.width||!rect.height)return;
+  const scale=Math.min(rect.width/CIR_RENDER_WIDTH,rect.height/CIR_RENDER_HEIGHT);
+  document.documentElement.style.setProperty('--cir-scale',String(Math.max(.15,scale)));
 }
-function openCir(){closeDevicePanels();renderCir(sim.state);$('#cir-modal').classList.add('open');$('#cir-modal').setAttribute('aria-hidden','false');document.body.classList.add('device-panel-active');}
+/** iframe 载入后接管：包装 buttonfix 以捕获按键，并写入本机车号。 */
+function installCirBridge(){
+  const w=cirWindow();if(!w)return;
+  let doc=null;try{doc=w.document;}catch{return;}
+  if(!doc||!doc.getElementById('mmibody'))return;
+  if(!w.__brakeCirBridge){
+    if(typeof w.buttonfix!=='function')return;
+    const original=w.buttonfix;
+    w.buttonfix=function(code){const result=original.apply(this,arguments);try{onCirKey(String(code));}catch{}return result;};
+    w.__brakeCirBridge=true;
+  }
+  try{if(Array.isArray(w.mmiinfo))w.mmiinfo[2]=CIR_LOCO_NO;}catch{}
+  cirBridgeReady=true;
+  $('#cir-loading')?.setAttribute('hidden','hidden');
+  syncCirPressure(true);
+}
+/** 把滞后后的尾压写进 CIR；force=true 时立即刷成当前值。 */
+function syncCirPressure(force=false){
+  if(!cirBridgeReady)return;
+  const w=cirWindow();if(!w)return;
+  const source=force||cirDelayedPressure==null?sim.state.tailPipe:cirDelayedPressure;
+  const value=Math.max(0,Math.round(source));
+  const text=String(value).padStart(4,'0').slice(-4);
+  try{if(Array.isArray(w.mmiinfo))w.mmiinfo[3]=text;}catch{}
+  try{
+    // CIR 源码在「列尾排风」里把界面值写死成 500、销号写成"不确定"，这里改回本模拟的实测值。
+    const shown=w.document&&w.document.getElementById('lwfyvalue');
+    if(shown)shown.innerHTML=String(value);
+  }catch{}
+}
+/** 每帧调用：尾部风压按 1~3 秒惯性滞后跟随，最终值与风压条一致。 */
+function updateCirPressure(dt){
+  if(!cirBridgeReady)return;
+  const target=sim.state.tailPipe;
+  if(cirDelayedPressure==null)cirDelayedPressure=target;
+  cirDelayedPressure+=(target-cirDelayedPressure)*Math.min(1,dt/Math.max(.2,cirPressureLag));
+  syncCirPressure();
+}
+function onCirKey(code){
+  if(code==='bt12'){                      // 风压查询
+    if(!cirLinked()){setCirNotice('列尾装置未连接：请先按「主控」进入主菜单，选第 6 项输入 6 位列尾号，再查询尾部风压。');return;}
+    syncCirPressure(true);
+    workflow.queryTail(sim.state,workflow.phase==='RELEASE'?'release':'brake');
+  }else if(code==='bt9'){                 // 列尾排风 → 尾部反馈
+    if(!cirLinked()){setCirNotice('列尾装置未连接，无法执行列尾排风试验。');return;}
+    workflow.confirmTail(workflow.phase==='RELEASE'?'release':'brake');
+  }else if(code==='bt10'){                // 列尾销号
+    setCirNotice('列尾装置已销号，尾部风压不再可靠。');
+  }
+}
+function setCirNotice(text){
+  cirNotice=text;renderCirHint();
+  clearTimeout(cirNoticeTimer);
+  cirNoticeTimer=setTimeout(()=>{cirNotice='';renderCirHint();},7000);
+}
+function renderCirHint(){
+  const el=$('#cir-hint');
+  if(el)el.textContent=cirNotice||workflow.message||'在 CIR 面板上按「风压查询」键读取尾部风压。';
+}
+function syncCirHint(){
+  renderCirHint();
+  const sub=$('#cir-subtitle');
+  if(sub)sub.textContent=cirLinked()?'列尾装置已连接':'列尾装置未连接 · 需先输入列尾号';
+}
+function openCir(){
+  closeDevicePanels();
+  const frame=$('#cir-frame');
+  if(frame&&!frame.dataset.loaded){frame.dataset.loaded='1';frame.src=CIR_SRC;}
+  $('#cir-modal').classList.add('open');
+  $('#cir-modal').setAttribute('aria-hidden','false');
+  document.body.classList.add('device-panel-active');
+  cirNotice='';
+  requestAnimationFrame(()=>{fitCirFrame();syncCirHint();});
+}
 function closeCir(){const modal=$('#cir-modal');if(!modal)return;modal.classList.remove('open');modal.setAttribute('aria-hidden','true');document.body.classList.remove('device-panel-active');}
 $('#open-cir').addEventListener('click',openCir);
 $('#cir-close').addEventListener('click',closeCir);
-$('#cir-modal').addEventListener('click',(event)=>{if(event.target===$('#cir-modal'))closeCir();});
-$('#cir-query-brake').addEventListener('click',()=>workflow.queryTail(sim.state,'brake'));
-$('#cir-confirm-brake').addEventListener('click',()=>workflow.confirmTail('brake'));
-$('#cir-query-release').addEventListener('click',()=>workflow.queryTail(sim.state,'release'));
-$('#cir-confirm-release').addEventListener('click',()=>workflow.confirmTail('release'));
+// 点面板外部（含面板四周的空白边距）即退回主界面。
+// 判定用 closest('.cir-device') 而不是 event.target === modal：手机上边距只有十几像素，
+// 精确指到 modal 本身很难，实测会出现"点了空白但不关闭"。
+$('#cir-modal').addEventListener('click',(event)=>{if(!event.target.closest('.cir-device'))closeCir();});
+$('#cir-frame')?.addEventListener('load',()=>{installCirBridge();fitCirFrame();syncCirHint();});
+addEventListener('resize',()=>{if($('#cir-modal')?.classList.contains('open'))fitCirFrame();});
 
 // ---------- 右侧可缩进抽屉（流程 / 操作台 / 教学场景） ----------
 // 刻意不做全屏遮罩：抽屉打开时学员还要一边看流程一边操作驾驶台，遮罩会把整个驾驶台挡住。
@@ -413,6 +494,20 @@ function buildScenarioPicker(){
   warning.hidden=false;
   warning.textContent=`地址参数 ?scenario=${attempt.requestedScenario} 不是有效场景，已按「正常 · 标准编组」运行。可用值：${keys}，或 ${EXAM_KEY}（考核抽考）。`;
 }
+/** 客车 / 货车切换。换车型要用对应公式重算参考排风时间，因此等价于按同一场景开新一轮。 */
+function buildTrainTypePicker(){
+  document.querySelectorAll('.train-type-picker button').forEach(button=>{
+    const active=button.dataset.type===attempt.trainType;
+    button.classList.toggle('active',active);
+    button.setAttribute('aria-pressed',String(active));
+  });
+}
+document.querySelectorAll('.train-type-picker button').forEach(button=>{
+  button.addEventListener('click',()=>{
+    if(button.dataset.type===attempt.trainType)return;
+    startAttempt(createSimpleBrakeAttempt(location.search,{scenario:attempt.scenarioKey,exam:attempt.exam,trainType:button.dataset.type}));
+  });
+});
 /** 切换到新一轮：整组替换 attempt / sim / workflow，并复位记录单状态。 */
 function startAttempt(next){
   closeAnswerModal();closeDevicePanels();
@@ -422,7 +517,12 @@ function startAttempt(next){
   sim.onChange(render);
   workflow.onChange(()=>renderTraining(sim.state));
   recordAutoShown=false;
+  // 每轮重新抽一次压力沿列车管传导的延迟（1~3 秒），并把 CIR 上的滞后值复位。
+  cirPressureLag=1+Math.random()*2;
+  cirDelayedPressure=null;
+  cirNotice='';
   buildScenarioPicker();
+  buildTrainTypePicker();
   setView('front');
 }
 $('#scenario-select')?.addEventListener('change',(event)=>{
@@ -435,10 +535,19 @@ $('#restart-test').addEventListener('click',()=>{
   startAttempt(createSimpleBrakeAttempt(location.search,{scenario:attempt.scenarioKey,exam:attempt.exam}));
 });
 buildScenarioPicker();
+// 调试与自动化验收接口（只读，不影响教学逻辑）。
+window.__brakeTest={
+  get attempt(){return attempt;},
+  get sim(){return sim;},
+  get workflow(){return workflow;},
+  command:(id,value)=>command(id,value),
+  cir:()=>({ready:cirBridgeReady,lag:cirPressureLag,delayed:cirDelayedPressure,linked:cirLinked(),
+    inside:(()=>{const w=cirWindow();try{return w&&w.mmiinfo?{tailId:String(w.mmiinfo[1]||''),locoNo:String(w.mmiinfo[2]||''),pressure:String(w.mmiinfo[3]||''),state:w.mmistate}:null;}catch{return null;};})()}),
+};
 $('#enter-training').addEventListener('click',enterImmersive);
 $('#exit-immersive').addEventListener('click',exitImmersive);
 addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement&&document.documentElement.classList.contains('immersive')&&!mobileLike)document.documentElement.classList.remove('immersive');routeScene.resize();});
 addEventListener('orientationchange',()=>{closeDevicePanels();setTimeout(()=>routeScene.resize(),160);});
 window.visualViewport?.addEventListener('resize',()=>routeScene.resize());
 addEventListener('pointerup',stopHorn,true);addEventListener('pointercancel',stopHorn,true);addEventListener('blur',()=>stopHorn());addEventListener('pagehide',()=>stopHorn());document.addEventListener('visibilitychange',()=>{if(document.hidden)stopHorn();});
-document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>setView(b.dataset.view)));buildSwitchPanel();buildLkj();buildKeys();bindDrag();setView('front');sim.onChange(render);workflow.onChange(()=>renderTraining(sim.state));let last=performance.now();function loop(now){const dt=Math.min(.05,(now-last)/1000);sim.tick(dt);workflow.update(sim.state,dt);routeScene.render();last=now;requestAnimationFrame(loop)}requestAnimationFrame(loop);
+document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>setView(b.dataset.view)));buildSwitchPanel();buildLkj();buildKeys();bindDrag();buildTrainTypePicker();setView('front');sim.onChange(render);workflow.onChange(()=>renderTraining(sim.state));let last=performance.now();function loop(now){const dt=Math.min(.05,(now-last)/1000);sim.tick(dt);workflow.update(sim.state,dt);updateCirPressure(dt);routeScene.render();last=now;requestAnimationFrame(loop)}requestAnimationFrame(loop);

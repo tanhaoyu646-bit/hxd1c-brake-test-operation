@@ -67,9 +67,12 @@ export function buildBrakeTestRecord({ attempt, state, workflow, now = new Date(
       scenario: attempt.title,
       scenarioKey: attempt.scenarioKey,
       exam: Boolean(attempt.exam),
+      trainType: attempt.trainType,
+      trainTypeLabel: attempt.trainTypeLabel,
       formationCars: attempt.formationCars,
       nominalTrainPipe: attempt.nominalTrainPipe,
       targetReduction: attempt.targetReduction,
+      exhaust: attempt.exhaust,
       debugFast: attempt.debugFast,
     },
     items,
@@ -84,7 +87,12 @@ export function formatRecordText(record) {
   lines.push(header.title);
   lines.push('='.repeat(46));
   lines.push(`试验编号：${header.attemptId}`);
-  lines.push(`试验场景：${header.scenario}${header.exam ? '（考核抽考 · 考试中未告知学员）' : ''}（编组 ${header.formationCars} 辆，定压 ${header.nominalTrainPipe} kPa）`);
+  lines.push(`试验场景：${header.scenario}${header.exam ? '（考核抽考 · 考试中未告知学员）' : ''}`);
+  lines.push(`列车类型：${header.trainTypeLabel}　编组 ${header.formationCars} 辆　定压 ${header.nominalTrainPipe} kPa　减压 ${header.targetReduction} kPa`);
+  lines.push(`排风时间依据：${header.exhaust.formulaText} → 参考 ${header.exhaust.reference} s，允许偏差 ±${header.exhaust.tolerance} s（${header.exhaust.toleranceRule}）`);
+  if (header.exhaust.scale !== 1) {
+    lines.push(`注意：本轮为调试加速模式，判定基准已同步缩放为 ${header.exhaust.min}～${header.exhaust.max} s，不得作为正式记录。`);
+  }
   lines.push(`开始时间：${header.createdAt}`);
   lines.push(`出单时间：${header.generatedAt}`);
   lines.push('');
