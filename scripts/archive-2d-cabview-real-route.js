@@ -1,6 +1,6 @@
 import { TrainSimulation } from './dynamics.js?rev=linear-exhaust-600kpa-v2-20260923';
 import { MstsRouteScene } from './mstsRouteScene.js?rev=texture-case-v9-20260922';
-import { createSimpleBrakeAttempt, EXHAUST_ANSWER_LABELS, SCENARIO_OPTIONS, EXAM_KEY, TEST_MODE_OPTIONS } from './brakeTestScenarios.js?rev=all-brake-tests-v2-20260923';
+import { createSimpleBrakeAttempt, EXHAUST_ANSWER_LABELS, SCENARIO_OPTIONS, EXAM_KEY, TEST_MODE_OPTIONS, FORMATION_OPTIONS } from './brakeTestScenarios.js?rev=formation-and-sandbox-v3-20260923';
 import { BrakeTestWorkflow } from './brakeTestWorkflow.js?rev=all-brake-tests-v2-20260923';
 import { FullTestWorkflow } from './fullTestWorkflow.js?rev=all-brake-tests-v1-20260923';
 import { buildBrakeTestRecord, formatRecordText, buildRecordHtml } from './brakeTestRecord.js?rev=all-brake-tests-v2-20260923';
@@ -259,10 +259,12 @@ function renderTraining(state,message='') {
   // 考核模式下不告知注入了哪种故障，只给编组与压力这类学员本来就该知道的信息。
   const summaryTitle=a.exam?'考核模式 · 本轮场景不告知':a.title;
   // 参考排风时间由车型与编组按公式算出（客车 0.75×辆数×减压量/100；货车 辆数×常数），
-  // 不再写死区间——改编组或换车型时判定基准自动跟着变。全部试验要显示感度/安定两档。
+  // 不再写死区间——改车型或改编组时判定基准自动跟着变。调试加速下显示值要与判定区间同口径，
+  // 否则会出现"参考 24 秒、允许 5.4～6.6 秒"这种自相矛盾的表述。
+  const speedNote=a.exhaust.scale===1?'':`（调试加速 1/${Math.round(1/a.exhaust.scale)}，表中值 ${a.exhaust.reference} 秒）`;
   const exhaustLine=full
-    ? `各档参考排风时间：${a.exhaustByLevel.filter(x=>x.checked&&(x.reduction===50||x.reduction===140)).map(x=>`${x.reduction} kPa → ${x.reference} s`).join(' · ')}`
-    : `参考排风时间 ${a.exhaust.reference} 秒（允许 ${a.exhaust.min} ～ ${a.exhaust.max} 秒）`;
+    ? `各档参考排风时间：${a.exhaustByLevel.filter(x=>x.checked&&(x.reduction===50||x.reduction===140)).map(x=>`${x.reduction} kPa → ${x.expected} s`).join(' · ')}${speedNote}`
+    : `参考排风时间 ${a.exhaust.expected} 秒（允许 ${a.exhaust.min} ～ ${a.exhaust.max} 秒）${speedNote}`;
   $('#attempt-summary').innerHTML=`<strong>${summaryTitle}</strong><br>${a.testModeLabel} · ${a.trainTypeLabel} · 编组 ${a.formationCars} 辆 · 定压 ${a.nominalTrainPipe} kPa${full?'':' · 减压 '+a.targetReduction+' kPa'}<br>${exhaustLine}<br><span class="formula-tag">${a.exhaust.formulaText}</span>${a.debugFast?'<br><span class="tag">调试模式：保压与排风均已加速，不得作为正式记录</span>':''}`;
   const observation=$('#observation');
   if(full){
@@ -530,6 +532,23 @@ function buildScenarioPicker(){
   warning.hidden=false;
   warning.textContent=`地址参数 ?scenario=${attempt.requestedScenario} 不是有效场景，已按「正常 · 标准编组」运行。可用值：${keys}，或 ${EXAM_KEY}（考核抽考）。`;
 }
+/**
+ * 编组辆数选择。它直接决定参考排风时间与压力变化速率（辆数越少排得越快），
+ * 是调节课堂演示节奏的物理手段——不改判定口径，参考时间随编组同步变化。
+ */
+function buildFormationPicker(){
+  const select=$('#formation-select');if(!select)return;
+  if(!select.dataset.filled){
+    select.innerHTML=FORMATION_OPTIONS.map(n=>`<option value="${n}">${n} 辆</option>`).join('');
+    select.dataset.filled='1';
+  }
+  select.value=String(attempt.formationCars);
+}
+$('#formation-select')?.addEventListener('change',(event)=>{
+  const cars=Number(event.target.value);
+  if(!Number.isFinite(cars)||cars===attempt.formationCars)return;
+  startAttempt(createSimpleBrakeAttempt(location.search,{scenario:attempt.scenarioKey,exam:attempt.exam,trainType:attempt.trainType,testMode:attempt.testMode,formationCars:cars}));
+});
 /** 试验项目切换（简略试验 / 全部试验）。两套阶段机不同，切换即按同一场景开新一轮。 */
 function buildTestModePicker(){
   document.querySelectorAll('.test-mode-picker button').forEach(button=>{
@@ -571,6 +590,7 @@ function startAttempt(next){
   cirDelayedPressure=null;
   cirNotice='';
   buildScenarioPicker();
+  buildFormationPicker();
   buildTestModePicker();
   buildTrainTypePicker();
   setView('front');
@@ -579,11 +599,11 @@ $('#scenario-select')?.addEventListener('change',(event)=>{
   const isExam=event.target.value===EXAM_KEY;
   // 选「考核抽考」就现场抽一种：抽到什么在记录单出来之前都不显示给学员。
   // 车型与试验项目必须沿用当前选择，否则换场景会把它们悄悄重置回默认值。
-  startAttempt(createSimpleBrakeAttempt(location.search,{scenario:isExam?EXAM_KEY:event.target.value,exam:isExam,trainType:attempt.trainType,testMode:attempt.testMode}));
+  startAttempt(createSimpleBrakeAttempt(location.search,{scenario:isExam?EXAM_KEY:event.target.value,exam:isExam,trainType:attempt.trainType,testMode:attempt.testMode,formationCars:attempt.formationCars}));
 });
 $('#restart-test').addEventListener('click',()=>{
-  // 重新开始本轮试验沿用本轮已定的场景（含抽考已抽到的那一种）、车型与试验项目，不重新抽签。
-  startAttempt(createSimpleBrakeAttempt(location.search,{scenario:attempt.scenarioKey,exam:attempt.exam,trainType:attempt.trainType,testMode:attempt.testMode}));
+  // 重新开始本轮试验沿用本轮已定的场景（含抽考已抽到的那一种）、车型、试验项目与编组，不重新抽签。
+  startAttempt(createSimpleBrakeAttempt(location.search,{scenario:attempt.scenarioKey,exam:attempt.exam,trainType:attempt.trainType,testMode:attempt.testMode,formationCars:attempt.formationCars}));
 });
 buildScenarioPicker();
 // 调试与自动化验收接口（只读，不影响教学逻辑）。
@@ -601,4 +621,4 @@ addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement&&documen
 addEventListener('orientationchange',()=>{closeDevicePanels();setTimeout(()=>routeScene.resize(),160);});
 window.visualViewport?.addEventListener('resize',()=>routeScene.resize());
 addEventListener('pointerup',stopHorn,true);addEventListener('pointercancel',stopHorn,true);addEventListener('blur',()=>stopHorn());addEventListener('pagehide',()=>stopHorn());document.addEventListener('visibilitychange',()=>{if(document.hidden)stopHorn();});
-document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>setView(b.dataset.view)));buildSwitchPanel();buildLkj();buildKeys();bindDrag();buildTestModePicker();buildTrainTypePicker();setView('front');sim.onChange(render);workflow.onChange(()=>renderTraining(sim.state));let last=performance.now();function loop(now){const dt=Math.min(.05,(now-last)/1000);sim.tick(dt);workflow.update(sim.state,dt);updateCirPressure(dt);routeScene.render();last=now;requestAnimationFrame(loop)}requestAnimationFrame(loop);
+document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>setView(b.dataset.view)));buildSwitchPanel();buildLkj();buildKeys();bindDrag();buildFormationPicker();buildTestModePicker();buildTrainTypePicker();setView('front');sim.onChange(render);workflow.onChange(()=>renderTraining(sim.state));let last=performance.now();function loop(now){const dt=Math.min(.05,(now-last)/1000);sim.tick(dt);workflow.update(sim.state,dt);updateCirPressure(dt);routeScene.render();last=now;requestAnimationFrame(loop)}requestAnimationFrame(loop);

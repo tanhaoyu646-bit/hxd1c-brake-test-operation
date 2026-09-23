@@ -374,12 +374,19 @@ export class FullTestWorkflow {
     const stabLevel = a.exhaustByLevel?.[spec.stability.level];
     const sensVerdict = this.exhaustVerdictOf(spec.sensitivity.level, this.sensExhaustSeconds);
     const stabVerdict = this.exhaustVerdictOf(spec.stability.level, this.stabExhaustSeconds);
-    const range = (item) => (item && item.reference !== null
-      ? `${item.min} ～ ${item.max} s（参考 ${item.reference} ± ${item.tolerance} s）`
-      : '—');
+    // 调试加速时参考值必须与判定区间同口径，避免"实测 6.0 s、参考 24 s、却判合格"的自相矛盾。
+    const range = (item) => {
+      if (!item || item.reference === null) return '—';
+      const basis = a.exhaust.scale === 1
+        ? `参考 ${item.reference} ± ${item.tolerance} s`
+        : `调试加速 1/${Math.round(1 / a.exhaust.scale)}：表中值 ${item.reference} ± ${item.tolerance} s`;
+      return `${item.min} ～ ${item.max} s（${basis}）`;
+    };
     const exhaustNote = (verdict, label, item, cars) => {
-      if (verdict === 'short') return `${label}实测值低于参考下限。按${a.trainTypeLabel}公式，编组 ${cars} 辆、减压 ${item?.reduction} kPa 应为 ${item?.reference} s；排风过快可能是折角塞门关闭或制动主管不畅`;
-      if (verdict === 'long') return `${label}实测值高于参考上限。按${a.trainTypeLabel}公式，编组 ${cars} 辆、减压 ${item?.reduction} kPa 应为 ${item?.reference} s；排风过慢可能是漏泄或车列连接异常`;
+      // 参考值同样按当前口径给出：调试加速时用加速后的秒数，否则会解释成表格原值。
+      const due = a.exhaust.scale === 1 ? `${item?.reference} s` : `${item?.expected} s（调试加速值）`;
+      if (verdict === 'short') return `${label}实测值低于参考下限。按${a.trainTypeLabel}公式，编组 ${cars} 辆、减压 ${item?.reduction} kPa 应为 ${due}；排风过快可能是折角塞门关闭或制动主管不畅`;
+      if (verdict === 'long') return `${label}实测值高于参考上限。按${a.trainTypeLabel}公式，编组 ${cars} 辆、减压 ${item?.reduction} kPa 应为 ${due}；排风过慢可能是漏泄或车列连接异常`;
       return '';
     };
 

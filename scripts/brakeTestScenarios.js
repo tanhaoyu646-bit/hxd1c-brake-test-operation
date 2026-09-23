@@ -148,6 +148,8 @@ export function buildExhaustByLevel(trainTypeKey, cars, nominalTrainPipe, target
       level: index,
       reduction,
       reference: round1(reference),
+      /** 含调试加速后的参考值，界面与记录单显示要与判定区间同口径 */
+      expected: round1(scaled),
       tolerance: round1(tolerance),
       min: round1(scaled - tolerance),
       max: round1(scaled + tolerance),
@@ -217,10 +219,20 @@ export const FULL_TEST_SPEC = {
   },
 };
 
+/** 常用编组辆数（参考表只列 30/40/50/60 辆，其余按公式连续推算）。 */
+export const FORMATION_OPTIONS = [20, 30, 40, 48, 60];
+
+/**
+ * 默认编组 30 辆。
+ * 48 辆时货车 100 kPa 的参考排风时间是 38.4 秒，课堂上压力变化看着偏慢；
+ * 30 辆对应 24.0 秒（排风速率 4.2 kPa/s），演示节奏更合适；需要标准场景时可切回 48 辆。
+ */
+export const DEFAULT_FORMATION_CARS = 30;
+
 const BASE_SCENARIO = {
-  id: 'simple-normal-48',
+  id: 'simple-normal',
   title: '简略试验 · 标准编组',
-  formationCars: 48,
+  formationCars: DEFAULT_FORMATION_CARS,
   nominalTrainPipe: 600,
   targetReduction: 100,
   targetPressureTolerance: 1,
@@ -327,7 +339,10 @@ export function createSimpleBrakeAttempt(search = '', overrides = {}) {
   const source = SCENARIOS[key] || BASE_SCENARIO;
   const trainTypeKey = resolveTrainType(overrides.trainType ?? params.get('type'));
   const testModeKey = resolveTestMode(overrides.testMode ?? params.get('test'));
-  const formationCars = Number(overrides.formationCars ?? source.formationCars);
+  // 编组可由抽屉选择器、地址参数 ?cars= 或调用参数覆盖。
+  // 它同时决定参考排风时间与压力变化速率（辆数越少排得越快），是调节演示节奏的物理手段。
+  const requestedCars = Number(overrides.formationCars ?? params.get('cars'));
+  const formationCars = Number.isFinite(requestedCars) && requestedCars > 0 ? requestedCars : source.formationCars;
   const timeScale = debugFast ? DEBUG_TIME_SCALE : 1;
   const exhaust = buildExhaustReference(trainTypeKey, formationCars, source.targetReduction, timeScale);
   const exhaustByLevel = buildExhaustByLevel(trainTypeKey, formationCars, source.nominalTrainPipe, source.targetReduction, timeScale);

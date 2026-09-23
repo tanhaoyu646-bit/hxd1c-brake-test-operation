@@ -18,6 +18,8 @@
 .record-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}.record-actions button{min-height:44px}
 .scenario-picker{display:grid;gap:4px;margin:0 10px 8px;font-size:11px;color:#8fc4dc}.scenario-picker select{width:100%;min-height:34px;padding:4px 6px;border:1px solid #2f7fa9;border-radius:6px;background:#04121d;color:#eaf6ff;font:inherit;font-size:12px}.scenario-warning{margin:0 10px 8px;padding:7px 9px;border:1px solid #b18433;border-radius:6px;background:#2a1f0d;color:#ffe19a;font-size:11px;line-height:1.55}.scenario-warning[hidden]{display:none}
 .test-actions[hidden],.observation[hidden]{display:none}
+.formation-picker{display:grid;gap:4px;margin:0 10px 8px;font-size:11px;color:#8fc4dc}
+.formation-picker select{width:100%;min-height:32px;padding:4px 6px;border:1px solid #2f7fa9;border-radius:6px;background:#04121d;color:#eaf6ff;font:inherit;font-size:12px}
 .test-mode-picker{display:flex;align-items:center;gap:7px;margin:0 10px 8px}
 .test-mode-picker .tm-label{flex:0 0 auto;font-size:11px;color:#8fc4dc}
 .test-mode-picker button{flex:1;min-height:34px;padding:4px;border-color:#2f7fa9;background:#0b2030;color:#b7dbe9;font-size:12px}
