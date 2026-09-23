@@ -1,8 +1,8 @@
 import { TrainSimulation } from './dynamics.js?rev=linear-exhaust-600kpa-v2-20260923';
 import { MstsRouteScene } from './mstsRouteScene.js?rev=texture-case-v9-20260922';
-import { createSimpleBrakeAttempt, EXHAUST_ANSWER_LABELS, SCENARIO_OPTIONS, EXAM_KEY, TEST_MODE_OPTIONS, FORMATION_OPTIONS } from './brakeTestScenarios.js?rev=formation-and-sandbox-v3-20260923';
-import { BrakeTestWorkflow } from './brakeTestWorkflow.js?rev=all-brake-tests-v2-20260923';
-import { FullTestWorkflow } from './fullTestWorkflow.js?rev=all-brake-tests-v1-20260923';
+import { createSimpleBrakeAttempt, EXHAUST_ANSWER_LABELS, SCENARIO_OPTIONS, EXAM_KEY, TEST_MODE_OPTIONS, FORMATION_OPTIONS } from './brakeTestScenarios.js?rev=auto-levels-v4-20260924';
+import { BrakeTestWorkflow } from './brakeTestWorkflow.js?rev=auto-levels-v4-20260924';
+import { FullTestWorkflow } from './fullTestWorkflow.js?rev=auto-levels-v4-20260924';
 import { buildBrakeTestRecord, formatRecordText, buildRecordHtml } from './brakeTestRecord.js?rev=all-brake-tests-v2-20260923';
 
 const $ = (q) => document.querySelector(q);
@@ -132,6 +132,9 @@ function command(id,value) {
   if(id==='direction'&&value===undefined)value=s.direction==='N'?'F':s.direction==='F'?'R':'N';
   const gate=workflow.guardCommand(id,value);
   if(!gate.allowed)return sim.reject(gate.message);
+  // 允许执行但带提示的情形（例如自阀位置不符合本步要求）：先把提示播报出来，
+  // 学员能看到"为什么流程没往下走"，命令本身照常作用（物理上真的动了）。
+  if(gate.message)workflow.setMessage(gate.message);
   const accepted=sim.command(id,value);
   if(accepted)workflow.afterCommand(id,value,sim.state);
   return accepted;

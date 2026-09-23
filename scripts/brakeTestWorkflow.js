@@ -60,19 +60,23 @@ export class BrakeTestWorkflow {
     }
     if (id !== 'auto-brake') return { allowed: true };
     const next = Number(value);
-    if (this.phase === 'STABILIZING') return { allowed: false, message: '列车管尚未稳定，请等待定压确认。' };
+    // 自阀 6 个位置全部开放操作：教学上要让学员自己把每个位置都拉一遍，
+    // 直观看到减压量越大、排风时间越长。位置不符合当前步骤时只给提示、不硬拦——
+    // 物理上照常作用，流程推进仍按正确位置判定，乱拉既不会"过关"，也不计入无关设备操作扣分。
+    if (this.phase === 'STABILIZING') {
+      if (next === 0) return { allowed: true };
+      return { allowed: true, message: '列车管尚未确认定压：此时移动自阀会直接影响定压确认。' };
+    }
     if (this.phase === 'REDUCE') {
-      if (next < 0 || next > 2) return { allowed: false, message: '简略试验要求自阀减压100 kPa，请置规定常用制动位置。' };
-      return { allowed: true };
+      if (next === 2) return { allowed: true };
+      return { allowed: true, message: `简略试验要求自阀减压 100 kPa，请置第 2 档（常用制动Ⅱ）；当前第 ${next} 档，流程不会继续推进。` };
     }
-    if (this.phase === 'HOLD') return { allowed: false, message: '正在保压试验，未完成前禁止移动自阀。' };
-    if (this.phase === 'RELEASE') {
-      // 自阀回运转位必须连续经过中间档位，这里只校验范围，
-      // 否则拖动过程会被误判成"操作无关设备"并累加扣分。
-      if (next < 0 || next > 5) return { allowed: false, message: '自阀档位超出有效范围。' };
-      return { allowed: true };
+    if (this.phase === 'HOLD') {
+      if (next === 2) return { allowed: true };
+      return { allowed: true, message: '正在保压试验：移动自阀会使保压压力变化，本次保压判定将按实际压力下降量计算。' };
     }
-    return { allowed: false, message: '当前步骤不需要操作自阀。' };
+    // RELEASE 与其它阶段不做限制：自阀回运转位必须连续经过中间档位。
+    return { allowed: true };
   }
 
   /**
@@ -86,10 +90,19 @@ export class BrakeTestWorkflow {
   afterCommand(id, value, state) {
     if (id !== 'auto-brake') return;
     const next = Number(value);
-    if (this.phase === 'REDUCE' && next > 0 && this.reductionStart === null) {
-      this.reductionStart = state.elapsed;
-      this.log('reduction-start', { pressure: state.trainPipe });
-      this.setMessage('自阀已产生减压作用，正在测量列车管排风时间。');
+    if (this.phase === 'REDUCE') {
+      if (next === 2) {
+        // 简略试验的目标位置固定为第 2 档（常用制动Ⅱ，减压 100 kPa）。
+        if (this.reductionStart === null) {
+          this.reductionStart = state.elapsed;
+          this.log('reduction-start', { pressure: state.trainPipe });
+          this.setMessage('自阀已置常用制动Ⅱ位，正在测量列车管排风时间。');
+        }
+      } else {
+        // 学员自行试了别的档位：不计入本步测量，回到规定位时重新计时。
+        // 否则先拉 1 档（减压 50）再拉到 2 档，两段排风会加在一起，排风时间被算长。
+        this.reductionStart = null;
+      }
     }
     if (this.phase === 'RELEASE' && next === 0 && this.releaseStart === null) {
       this.releaseStart = state.elapsed;
@@ -337,11 +350,11 @@ export class BrakeTestWorkflow {
       {
         label: '排风时间',
         actual: Number.isFinite(this.exhaustSeconds) ? `${this.exhaustSeconds.toFixed(1)} s` : '未测得',
-        // 调试加速时参考值必须与判定区间同口径，否则会出现"实测 9.5 s、
-        // 参考 38.4 s、却判合格"的自相矛盾表述。
+        // 调试加速时参考值与容差都要用加速后的口径，否则会出现"实测 6.2 s、
+        // 参考 24 ± 2.4 s、却判合格"的自相矛盾表述。
         reference: a.exhaust.scale === 1
           ? `${a.exhaust.min} ～ ${a.exhaust.max} s（参考 ${a.exhaust.reference} ± ${a.exhaust.tolerance} s）`
-          : `${a.exhaust.min} ～ ${a.exhaust.max} s（调试加速 1/${Math.round(1 / a.exhaust.scale)}：参考 ${a.exhaust.reference} ± ${a.exhaust.tolerance} s 已同步缩放）`,
+          : `${a.exhaust.min} ～ ${a.exhaust.max} s（调试加速 1/${Math.round(1 / a.exhaust.scale)}：参考 ${a.exhaust.expected} ± ${a.exhaust.expectedTolerance} s，表中值 ${a.exhaust.reference} s）`,
         verdict: exhaustVerdict === 'normal' ? 'pass' : exhaustVerdict === 'unknown' ? 'pending' : 'fail',
         note: exhaustVerdict === 'short'
           ? `实测值低于参考下限。按${a.trainTypeLabel}公式（${a.exhaust.formulaText}），编组 ${a.formationCars} 辆、减压 ${a.targetReduction} kPa 应为 ${a.exhaust.reference} s；排风过快可能是折角塞门关闭或制动主管不畅，应检查列车管贯通状态`

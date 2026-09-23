@@ -147,8 +147,10 @@ export function buildExhaustByLevel(trainTypeKey, cars, nominalTrainPipe, target
     return {
       level: index,
       reduction,
+      /** 参考表口径（未加速），用于注明"表中值" */
       reference: round1(reference),
-      /** 含调试加速后的参考值，界面与记录单显示要与判定区间同口径 */
+      referenceTolerance: round1(Math.max(reference * 0.1, 2)),
+      /** 当前判定口径（含调试加速）。显示与判定都必须用它，否则会自相矛盾。 */
       expected: round1(scaled),
       tolerance: round1(tolerance),
       min: round1(scaled - tolerance),

@@ -130,12 +130,11 @@ export class FullTestWorkflow {
     }
     if (id !== 'auto-brake') return { allowed: true };
     const next = Number(value);
+    // 与简略试验同一口径：自阀 6 个位置全部开放操作，位置不符合本步要求时只提示、不硬拦。
+    // 物理上照常作用，流程推进仍按规定位置判定，乱拉不会「过关」。
     const range = LEVEL_RANGES[this.phase];
-    if (!range) return { allowed: false, message: '当前步骤不需要操作自阀。' };
-    if (next < range[0] || next > range[1]) {
-      return { allowed: false, message: LEVEL_HINTS[this.phase] || '当前自阀位置不符合本步试验要求。' };
-    }
-    return { allowed: true };
+    if (!range || (next >= range[0] && next <= range[1])) return { allowed: true };
+    return { allowed: true, message: LEVEL_HINTS[this.phase] || '当前自阀位置不符合本步试验要求，流程不会继续推进。' };
   }
 
   /** 一次拖动自阀 = 一次操作，用于「操纵是否一次到位」的评价。 */
@@ -379,7 +378,7 @@ export class FullTestWorkflow {
       if (!item || item.reference === null) return '—';
       const basis = a.exhaust.scale === 1
         ? `参考 ${item.reference} ± ${item.tolerance} s`
-        : `调试加速 1/${Math.round(1 / a.exhaust.scale)}：表中值 ${item.reference} ± ${item.tolerance} s`;
+        : `调试加速 1/${Math.round(1 / a.exhaust.scale)}：参考 ${item.expected} ± ${item.tolerance} s，表中值 ${item.reference} s`;
       return `${item.min} ～ ${item.max} s（${basis}）`;
     };
     const exhaustNote = (verdict, label, item, cars) => {
