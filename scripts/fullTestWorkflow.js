@@ -1,21 +1,24 @@
 /**
  * 列车自动制动机「全部试验」流程。
  *
- * 按《技规》列车自动制动机全部试验的顺序：充风缓解 → 感度 → 安定 → 紧急制动 → 缓解。
- * 与「简略试验」共用同一套装置、同一套排风时间参考公式、同一套记录单骨架。
+ * 依据《铁路机车操作规则》第 15 条（与《技规》一致）：
+ *   全部试验 = **感度试验 + 安定试验两项，不包含紧急制动试验**。
+ *   · 感度试验：自阀减压 50 kPa（编组 60 辆及以上为 70 kPa）并保压 1 min，
+ *     全列车必须发生制动作用、不得自然缓解；手柄移至运转位后全列车须在 1 min 内缓解完毕。
+ *   · 安定试验：自阀施行最大有效减压（定压 600 kPa 时为 170 kPa），要求不发生紧急制动，
+ *     并检查制动缸活塞行程或制动指示器是否符合规定。
+ *   · 两项都要检查制动主管漏泄量 ≤ 20 kPa/min；司机应确认并正确记录充、排风时间；
+ *     装有列尾装置的列车，还要进行列尾风压查询。
  *
- * 阶段推进只看「操作是否做到」；合格与否由 getJudgements() 汇总判定。
- * 这是刻意的口径：某个子项异常（例如排风过短）时流程仍走完，但结论判不合格并给出检查方向，
- * 学员能拿到完整结论；若中途中止就只能在记录单上看到"未完成"，失去教学价值。
+ * 与简略试验共用同一套装置、同一张排风时间参考表、同一套记录单骨架。
+ * 每个子试验的"判断排风时间 / 列尾查询 / 列尾反馈"动作与简略试验完全一致，
+ * 只是分别记在各自的子项上（互不覆盖）。
  *
- * 自阀档位与本流程的对应（reductions = [0, 50, 100, 140, 170, 定压]）：
- *   1 档 = 初制动位（减压 50 kPa） → 感度试验
- *   3 档 = 常用制动Ⅲ（减压 140 kPa）→ 安定试验
- *   5 档 = 紧急位（列车管排空）      → 紧急制动试验
- * 三个档位的参考排风时间同样由参考表按各自减压量算出（48 辆货车：24.0 / 48.0 秒）。
+ * 阶段推进只看「操作是否做到」；合格与否由 getJudgements() 汇总判定 ——
+ * 某个子项异常时流程仍走完，但结论判不合格并给出检查方向，学员能拿到完整结论。
  */
 
-import { FULL_TEST_SPEC } from './brakeTestScenarios.js';
+import { FULL_TEST_SPEC, EXHAUST_ANSWER_LABELS } from './brakeTestScenarios.js';
 
 const CRITICAL_UNRELATED_COMMANDS = new Set([
   'panto', 'main-breaker', 'compressor', 'parking', 'parking-apply',
@@ -23,47 +26,50 @@ const CRITICAL_UNRELATED_COMMANDS = new Set([
   'power-cabinet-switch', 'control-power',
 ]);
 
+/** 按《铁路机车操作规则》第 15 条，全部试验只有这两项。 */
+const SUB_ORDER = ['sensitivity', 'stability'];
+
 export const FULL_PHASES = {
-  STABILIZING: 'STABILIZING',
+  PREPARE: 'PREPARE',
   SENS_REDUCE: 'SENS_REDUCE',
   SENS_HOLD: 'SENS_HOLD',
   SENS_RELEASE: 'SENS_RELEASE',
   STAB_REDUCE: 'STAB_REDUCE',
   STAB_HOLD: 'STAB_HOLD',
   STAB_RELEASE: 'STAB_RELEASE',
-  EMERGENCY: 'EMERGENCY',
-  EMERGENCY_CHECK: 'EMERGENCY_CHECK',
-  RELEASE: 'RELEASE',
   COMPLETE: 'COMPLETE',
   FAILED: 'FAILED',
 };
 
-/** 各阶段允许的自阀档位区间：[最小, 最大]。拖动必然经过中间档位，所以给区间而不是固定值。 */
+/** 阶段 → （子项 key, 动作阶段）。子项逻辑通用，两个子试验共用同一段代码。 */
+const PHASE_MAP = {
+  SENS_REDUCE: ['sensitivity', 'reduce'],
+  SENS_HOLD: ['sensitivity', 'hold'],
+  SENS_RELEASE: ['sensitivity', 'release'],
+  STAB_REDUCE: ['stability', 'reduce'],
+  STAB_HOLD: ['stability', 'hold'],
+  STAB_RELEASE: ['stability', 'release'],
+};
+
+const NEXT_PHASE = {
+  SENS_RELEASE: FULL_PHASES.STAB_REDUCE,
+  STAB_RELEASE: FULL_PHASES.COMPLETE,
+};
+
+/** 各阶段允许的自阀档位区间：[最小, 最大]。仅用于生成提示，不再硬拦。 */
 const LEVEL_RANGES = {
-  STABILIZING: [0, 0],
+  PREPARE: [0, 0],
   SENS_REDUCE: [0, 1],
   SENS_HOLD: [1, 1],
   SENS_RELEASE: [0, 1],
-  STAB_REDUCE: [0, 3],
-  STAB_HOLD: [3, 3],
-  STAB_RELEASE: [0, 3],
-  EMERGENCY: [0, 5],
-  EMERGENCY_CHECK: [5, 5],
-  RELEASE: [0, 5],
+  STAB_REDUCE: [0, 4],
+  STAB_HOLD: [4, 4],
+  STAB_RELEASE: [0, 4],
 };
 
-const LEVEL_HINTS = {
-  STABILIZING: '请确认列车管定压并保持自阀运转位。',
-  SENS_REDUCE: `感度试验要求减压 ${FULL_TEST_SPEC.sensitivity.reduction} kPa，请将自阀置初制动位（1 档）。`,
-  SENS_HOLD: '感度试验保压中，未完成前禁止移动自阀。',
-  SENS_RELEASE: '请将自阀回运转位，待列车管充风恢复定压后再做安定试验。',
-  STAB_REDUCE: `安定试验要求减压 ${FULL_TEST_SPEC.stability.reduction} kPa，请将自阀置常用制动Ⅲ位（3 档）。`,
-  STAB_HOLD: '安定试验保压中，未完成前禁止移动自阀。',
-  STAB_RELEASE: '请将自阀回运转位，待列车管充风恢复定压后再做紧急制动试验。',
-  EMERGENCY: '紧急制动试验：请将自阀置紧急位（5 档）。',
-  EMERGENCY_CHECK: '紧急制动作用中，正在检查列车管排空与制动缸压力。',
-  RELEASE: '请将自阀回运转位，确认列车管充风恢复、制动缸压力归零。',
-};
+function levelName(level) {
+  return ['运转位', '初制动位', '常用制动Ⅱ', '常用制动Ⅲ', '常用制动Ⅳ', '紧急位'][level] || `第 ${level} 档`;
+}
 
 export class FullTestWorkflow {
   constructor(attempt) {
@@ -73,44 +79,50 @@ export class FullTestWorkflow {
   }
 
   reset() {
-    this.phase = FULL_PHASES.STABILIZING;
-    this.message = '确认列车管达到规定压力并保持稳定，同时确认制动缸已缓解。';
-    this.stableElapsed = 0;
-    // 充风缓解试验
-    this.chargePressure = null;
-    this.chargeBrakeCyl = null;
-    this.chargePassed = false;
-    // 感度试验（减压 50 kPa）
-    this.sensReductionStart = null;
-    this.sensExhaustSeconds = null;
-    this.sensHoldStart = null;
-    this.sensHoldElapsed = 0;
-    this.sensHoldStartPressure = null;
-    this.sensHoldDrop = 0;
-    this.sensBrakeCyl = 0;
-    this.sensReleaseAt = null;
-    this.sensReleasePressure = null;
-    // 安定试验（减压 140 kPa）
-    this.stabReductionStart = null;
-    this.stabExhaustSeconds = null;
-    this.stabHoldStart = null;
-    this.stabHoldElapsed = 0;
-    this.stabHoldStartPressure = null;
-    this.stabHoldDrop = 0;
-    this.stabBrakeCyl = 0;
-    this.stabReleaseAt = null;
-    this.stabReleasePressure = null;
-    // 紧急制动试验
-    this.emergencyStart = null;
-    this.emergencyExhaustSeconds = null;
-    this.emergencyCylReachedAt = null;
-    this.emergencyBrakeCyl = 0;
-    // 缓解
-    this.releaseStart = null;
-    this.releasePressure = null;
-    this.releaseBrakeCyl = null;
-    this.releasePassed = false;
-    // 操纵评价
+    const a = this.attempt;
+    const spec = FULL_TEST_SPEC;
+    this.phase = FULL_PHASES.PREPARE;
+    this.message = '确认列车充满风、制动主管达到规定压力，制动缸呈缓解状态。';
+    this.prepareElapsed = 0;
+    this.preparePressure = null;
+    this.prepareBrakeCyl = null;
+    this.preparePassed = false;
+
+    // 两个子试验各存一份，字段同名，逻辑复用
+    this.subs = {};
+    for (const key of SUB_ORDER) {
+      const conf = spec[key];
+      const level = conf.level;
+      this.subs[key] = {
+        key,
+        label: conf.label,
+        shortLabel: key === 'sensitivity' ? '感度' : '安定',
+        level,
+        reduction: (a.levelReductions && a.levelReductions[level]) || 0,
+        reduceStart: null,
+        exhaustSeconds: null,
+        holdStart: null,
+        holdElapsed: 0,
+        holdStartCyl: null,
+        holdStartPressure: null,
+        cylRelax: 0,
+        holdDrop: 0,
+        maxCyl: 0,
+        answer: null,
+        answerCorrect: null,
+        tailQuery: null,
+        tailConfirmed: false,
+        releaseStart: null,
+        releaseElapsed: null,
+        releasePassed: false,
+        releaseTailQuery: null,
+        releaseConfirmed: false,
+        /** 保压/缓解以动作做完为准时的宽限计时，避免漏做列尾动作就卡死 */
+        holdWait: 0,
+        releaseWait: 0,
+      };
+    }
+
     this.autoBrakeOperations = 0;
     this.levelOrder = [];
     this.failureReason = null;
@@ -124,6 +136,16 @@ export class FullTestWorkflow {
   log(type, detail = {}) { this.events.push({ type, at: Date.now(), ...detail }); }
   setMessage(message) { this.message = message; this.emit(); }
 
+  /** 当前阶段对应的子项与动作阶段，例如 ['sensitivity', 'hold']。 */
+  get current() { return PHASE_MAP[this.phase] || null; }
+  get currentSub() { const c = this.current; return c ? this.subs[c[0]] : null; }
+  get stage() { const c = this.current; return c ? c[1] : null; }
+
+  /** 当前子试验的减压量（感度档随编组变化：60 辆及以上为 70 kPa）。 */
+  reductionOf(key) { return this.subs[key].reduction; }
+
+  // ---------------------------------------------------------------- 指令闸门
+
   guardCommand(id, value) {
     if (CRITICAL_UNRELATED_COMMANDS.has(id)) {
       return { allowed: false, message: '当前为列车自动制动机试验，请勿操作无关设备。' };
@@ -131,389 +153,425 @@ export class FullTestWorkflow {
     if (id !== 'auto-brake') return { allowed: true };
     const next = Number(value);
     // 与简略试验同一口径：自阀 6 个位置全部开放操作，位置不符合本步要求时只提示、不硬拦。
-    // 物理上照常作用，流程推进仍按规定位置判定，乱拉不会「过关」。
     const range = LEVEL_RANGES[this.phase];
     if (!range || (next >= range[0] && next <= range[1])) return { allowed: true };
-    return { allowed: true, message: LEVEL_HINTS[this.phase] || '当前自阀位置不符合本步试验要求，流程不会继续推进。' };
+    return { allowed: true, message: this.stepHint(next) };
+  }
+
+  stepHint(level) {
+    const sub = this.currentSub;
+    if (this.phase === FULL_PHASES.PREPARE) {
+      return '列车尚未充满风：此时移动自阀会影响定压确认。';
+    }
+    if (this.phase === FULL_PHASES.COMPLETE || this.phase === FULL_PHASES.FAILED) {
+      return '全部试验已完成，请核对试验记录单；如需重做请点「重新开始本轮试验」。';
+    }
+    if (!sub) return '当前自阀位置不符合本步试验要求，流程不会继续推进。';
+    if (this.stage === 'reduce') {
+      return `${sub.label}要求自阀置第 ${sub.level} 档（${levelName(sub.level)}，减压 ${sub.reduction} kPa）；当前第 ${level} 档，流程不会继续推进。`;
+    }
+    if (this.stage === 'hold') {
+      return `${sub.label}保压中：移动自阀会使保压压力变化，本次保压判定将按实际变化量计算。`;
+    }
+    if (this.stage === 'release') {
+      return `${sub.label}：请将自阀回运转位，待列车管充风恢复后做列尾查询并确认尾部缓解。`;
+    }
+    return '全部试验已完成，请核对试验记录单；如需重做请点「重新开始本轮试验」。';
   }
 
   /** 一次拖动自阀 = 一次操作，用于「操纵是否一次到位」的评价。 */
-  noteAutoBrakeDrag() {
-    this.autoBrakeOperations += 1;
-  }
+  noteAutoBrakeDrag() { this.autoBrakeOperations += 1; }
 
   afterCommand(id, value, state) {
     if (id !== 'auto-brake') return;
     const next = Number(value);
-    if (this.phase === FULL_PHASES.SENS_REDUCE && next === 1 && this.sensReductionStart === null) {
-      this.sensReductionStart = state.elapsed;
-      this.log('sens-reduction-start', { pressure: state.trainPipe });
-      this.setMessage(`感度试验：自阀已置初制动位，正在测量列车管排风时间（减压 ${FULL_TEST_SPEC.sensitivity.reduction} kPa）。`);
-    }
-    if (this.phase === FULL_PHASES.STAB_REDUCE && next === 3 && this.stabReductionStart === null) {
-      this.stabReductionStart = state.elapsed;
-      this.log('stab-reduction-start', { pressure: state.trainPipe });
-      this.setMessage(`安定试验：自阀已置常用制动Ⅲ位，正在测量列车管排风时间（减压 ${FULL_TEST_SPEC.stability.reduction} kPa）。`);
-    }
-    if (this.phase === FULL_PHASES.EMERGENCY && next === 5 && this.emergencyStart === null) {
-      this.emergencyStart = state.elapsed;
-      this.log('emergency-start', { pressure: state.trainPipe });
-      this.setMessage('紧急制动试验：自阀已置紧急位，正在测量列车管排空时间。');
-    }
-    if (this.phase === FULL_PHASES.RELEASE && next === 0 && this.releaseStart === null) {
-      this.releaseStart = state.elapsed;
-      this.log('release-start', { pressure: state.trainPipe });
-      this.setMessage('自阀已回运转位，正在充风缓解。');
-    }
     if (!this.levelOrder.includes(next)) this.levelOrder.push(next);
-  }
+    const sub = this.currentSub;
+    if (!sub) return;
 
-  update(state, dt) {
-    const a = this.attempt;
-    const spec = FULL_TEST_SPEC;
-    const levelTolerance = a.targetPressureTolerance;
-
-    if (this.phase === FULL_PHASES.STABILIZING) {
-      const stable = Math.abs(state.trainPipe - a.nominalTrainPipe) <= a.stablePressureTolerance
-        && Math.abs(state.tailPipe - a.nominalTrainPipe) <= a.stablePressureTolerance
-        && state.autoBrake === 0
-        && state.brakeCyl <= spec.charge.maxBrakeCyl;
-      this.stableElapsed = stable ? this.stableElapsed + dt : 0;
-      if (stable) {
-        this.chargePressure = { head: state.trainPipe, tail: state.tailPipe };
-        this.chargeBrakeCyl = Math.max(this.chargeBrakeCyl ?? 0, state.brakeCyl);
-      }
-      if (this.stableElapsed >= a.stableDuration) {
-        this.chargePassed = true;
-        this.log('charge-pass', { head: state.trainPipe, cylinder: state.brakeCyl });
-        this.phase = FULL_PHASES.SENS_REDUCE;
-        this.setMessage(`充风缓解试验合格（列车管 ${Math.round(state.trainPipe)} kPa，制动缸 ${Math.round(state.brakeCyl)} kPa）。${LEVEL_HINTS.SENS_REDUCE}`);
+    if (this.stage === 'reduce') {
+      if (next === sub.level) {
+        if (sub.reduceStart === null) {
+          sub.reduceStart = state.elapsed;
+          this.log(`${sub.key}-reduce-start`, { pressure: state.trainPipe });
+          this.setMessage(`${sub.label}：自阀已置第 ${sub.level} 档（减压 ${sub.reduction} kPa），正在测量列车管排风时间。`);
+        }
+      } else {
+        // 学员自行试了别的档位：不计入本步测量，回到规定位时重新计时。
+        // 否则先拉一档别的再拉到规定位，两段排风会加在一起、排风时间被算长。
+        sub.reduceStart = null;
       }
       return;
     }
-
-    if (this.phase === FULL_PHASES.SENS_REDUCE) {
-      if (this.sensReductionStart === null) return;
-      const target = a.nominalTrainPipe - spec.sensitivity.reduction;
-      if (state.trainPipe <= target + levelTolerance) {
-        this.sensExhaustSeconds = Math.max(0, state.elapsed - this.sensReductionStart);
-        this.sensHoldStart = state.elapsed;
-        this.sensHoldStartPressure = state.trainPipe;
-        this.sensBrakeCyl = state.brakeCyl;
-        this.phase = FULL_PHASES.SENS_HOLD;
-        this.log('sens-reduction-reached', { seconds: this.sensExhaustSeconds, pressure: state.trainPipe, cylinder: state.brakeCyl });
-        this.setMessage(`感度试验减压达到 ${spec.sensitivity.reduction} kPa，开始保压 ${a.holdDuration} 秒。`);
-      }
-      return;
-    }
-
-    if (this.phase === FULL_PHASES.SENS_HOLD) {
-      this.sensHoldElapsed = Math.min(a.holdDuration, Math.max(0, state.elapsed - this.sensHoldStart));
-      this.sensHoldDrop = Math.max(0, this.sensHoldStartPressure - state.trainPipe);
-      this.sensBrakeCyl = Math.max(this.sensBrakeCyl, state.brakeCyl);
-      this.tickTimer();
-      if (this.sensHoldElapsed >= a.holdDuration) {
-        this.log('sens-hold-done', { drop: this.sensHoldDrop, cylinder: this.sensBrakeCyl });
-        this.phase = FULL_PHASES.SENS_RELEASE;
-        this.setMessage(`感度试验保压完成（制动缸 ${Math.round(this.sensBrakeCyl)} kPa，列车管下降 ${this.sensHoldDrop.toFixed(0)} kPa）。${LEVEL_HINTS.SENS_RELEASE}`);
-      }
-      return;
-    }
-
-    // 子试验之间必须恢复定压：感度试验只减压 50 kPa，若不复原就接着做安定试验，
-    // 安定试验实际只排掉约 90 kPa，排风时间会明显短于 140 kPa 对应的参考值。
-    if (this.phase === FULL_PHASES.SENS_RELEASE) {
-      if (state.autoBrake === 0 && state.trainPipe >= a.nominalTrainPipe - a.stablePressureTolerance) {
-        this.sensReleaseAt = state.elapsed;
-        this.sensReleasePressure = state.trainPipe;
-        this.log('sens-release-recovered', { pressure: state.trainPipe });
-        this.phase = FULL_PHASES.STAB_REDUCE;
-        this.setMessage(`感度试验后列车管已恢复定压（${Math.round(state.trainPipe)} kPa）。${LEVEL_HINTS.STAB_REDUCE}`);
-      }
-      return;
-    }
-
-    if (this.phase === FULL_PHASES.STAB_REDUCE) {
-      if (this.stabReductionStart === null) return;
-      const target = a.nominalTrainPipe - spec.stability.reduction;
-      if (state.trainPipe <= target + levelTolerance) {
-        this.stabExhaustSeconds = Math.max(0, state.elapsed - this.stabReductionStart);
-        this.stabHoldStart = state.elapsed;
-        this.stabHoldStartPressure = state.trainPipe;
-        this.stabBrakeCyl = state.brakeCyl;
-        this.phase = FULL_PHASES.STAB_HOLD;
-        this.log('stab-reduction-reached', { seconds: this.stabExhaustSeconds, pressure: state.trainPipe, cylinder: state.brakeCyl });
-        this.setMessage(`安定试验减压达到 ${spec.stability.reduction} kPa，开始保压 ${a.holdDuration} 秒。`);
-      }
-      return;
-    }
-
-    if (this.phase === FULL_PHASES.STAB_HOLD) {
-      this.stabHoldElapsed = Math.min(a.holdDuration, Math.max(0, state.elapsed - this.stabHoldStart));
-      this.stabHoldDrop = Math.max(0, this.stabHoldStartPressure - state.trainPipe);
-      this.stabBrakeCyl = Math.max(this.stabBrakeCyl, state.brakeCyl);
-      this.tickTimer();
-      if (this.stabHoldElapsed >= a.holdDuration) {
-        this.log('stab-hold-done', { drop: this.stabHoldDrop, cylinder: this.stabBrakeCyl });
-        this.phase = FULL_PHASES.STAB_RELEASE;
-        this.setMessage(`安定试验保压完成（制动缸 ${Math.round(this.stabBrakeCyl)} kPa，列车管下降 ${this.stabHoldDrop.toFixed(0)} kPa）。${LEVEL_HINTS.STAB_RELEASE}`);
-      }
-      return;
-    }
-
-    if (this.phase === FULL_PHASES.STAB_RELEASE) {
-      if (state.autoBrake === 0 && state.trainPipe >= a.nominalTrainPipe - a.stablePressureTolerance) {
-        this.stabReleaseAt = state.elapsed;
-        this.stabReleasePressure = state.trainPipe;
-        this.log('stab-release-recovered', { pressure: state.trainPipe });
-        this.phase = FULL_PHASES.EMERGENCY;
-        this.setMessage(`安定试验后列车管已恢复定压（${Math.round(state.trainPipe)} kPa）。${LEVEL_HINTS.EMERGENCY}`);
-      }
-      return;
-    }
-
-    if (this.phase === FULL_PHASES.EMERGENCY) {
-      if (this.emergencyStart === null) return;
-      this.emergencyBrakeCyl = Math.max(this.emergencyBrakeCyl, state.brakeCyl);
-      if (state.trainPipe <= 15) {
-        this.emergencyExhaustSeconds = Math.max(0, state.elapsed - this.emergencyStart);
-        this.phase = FULL_PHASES.EMERGENCY_CHECK;
-        this.log('emergency-exhausted', { seconds: this.emergencyExhaustSeconds, cylinder: state.brakeCyl });
-        this.setMessage(`列车管已排空（用时 ${this.emergencyExhaustSeconds.toFixed(1)} 秒），正在检查制动缸压力。`);
-      }
-      return;
-    }
-
-    if (this.phase === FULL_PHASES.EMERGENCY_CHECK) {
-      this.emergencyBrakeCyl = Math.max(this.emergencyBrakeCyl, state.brakeCyl);
-      const reached = state.brakeCyl >= spec.emergency.minBrakeCyl;
-      if (reached && this.emergencyCylReachedAt === null) {
-        this.emergencyCylReachedAt = state.elapsed - this.emergencyStart;
-        this.log('emergency-cylinder-reached', { seconds: this.emergencyCylReachedAt, cylinder: state.brakeCyl });
-      }
-      // 超时保护：制动缸迟迟不达标也要放行，否则学员会卡在这一步拿不到任何结论。
-      const waited = state.elapsed - this.emergencyStart;
-      if (reached || waited >= spec.emergency.maxBrakeCylSeconds * 2) {
-        this.phase = FULL_PHASES.RELEASE;
-        this.setMessage(`紧急制动试验检查完成（制动缸最高 ${Math.round(this.emergencyBrakeCyl)} kPa）。${LEVEL_HINTS.RELEASE}`);
-      }
-      return;
-    }
-
-    if (this.phase === FULL_PHASES.RELEASE) {
-      if (this.releaseStart === null) return;
-      const headRecovered = state.trainPipe >= a.nominalTrainPipe - a.stablePressureTolerance;
-      const cylinderReleased = state.brakeCyl <= spec.release.maxBrakeCyl;
-      if (headRecovered && cylinderReleased) {
-        this.releasePressure = state.trainPipe;
-        this.releaseBrakeCyl = state.brakeCyl;
-        this.releasePassed = true;
-        this.phase = FULL_PHASES.COMPLETE;
-        this.log('complete', { head: state.trainPipe, cylinder: state.brakeCyl });
-        this.setMessage('全部试验流程已走完，请核对试验记录单确认最终结论。');
-      }
+    if (this.stage === 'release' && next === 0 && sub.releaseStart === null) {
+      sub.releaseStart = state.elapsed;
+      this.log(`${sub.key}-release-start`, { pressure: state.trainPipe });
+      this.setMessage(`${sub.label}：自阀已回运转位，正在充风缓解（规程要求 1 min 内缓解完毕）。`);
     }
   }
 
-  tickTimer() {
-    const second = Math.floor(Math.max(this.sensHoldElapsed, this.stabHoldElapsed));
-    if (second !== this.lastTimerSecond) { this.lastTimerSecond = second; this.emit(); }
+  // ---------------------------------------------------- 学员动作（答题 / 列尾）
+
+  /** 当前需要学员判断排风时间的子项 key；不需要时返回 null。 */
+  get answerTarget() {
+    const sub = this.currentSub;
+    if (!sub || this.stage !== 'hold') return null;
+    if (!Number.isFinite(sub.exhaustSeconds)) return null;
+    return sub.answer === null ? sub.key : null;
   }
 
-  /** 保压剩余秒数（供界面显示）。 */
-  get holdRemaining() {
-    const a = this.attempt;
-    if (this.phase === FULL_PHASES.SENS_HOLD) return Math.max(0, a.holdDuration - this.sensHoldElapsed);
-    if (this.phase === FULL_PHASES.STAB_HOLD) return Math.max(0, a.holdDuration - this.stabHoldElapsed);
+  submitExhaustAnswer(answer) {
+    const sub = this.currentSub;
+    if (!sub || this.stage !== 'hold') return { accepted: false };
+    const verdict = this.exhaustVerdictOf(sub.level, sub.exhaustSeconds);
+    sub.answer = answer;
+    sub.answerCorrect = answer === verdict;
+    this.log(`${sub.key}-answer`, { answer, correct: sub.answerCorrect });
+    this.setMessage(sub.answerCorrect
+      ? `${sub.label}排风时间判断正确（${EXHAUST_ANSWER_LABELS[answer]}）。`
+      : `${sub.label}排风时间判断有误：实测 ${sub.exhaustSeconds.toFixed(1)} 秒，应为「${EXHAUST_ANSWER_LABELS[verdict] || '—'}」。`);
+    return { accepted: true, correct: sub.answerCorrect };
+  }
+
+  /** 当前可做的列尾动作：{ key, kind } 或 null。kind: 'brake'（制动后）| 'release'（缓解后）。 */
+  get tailTarget() {
+    const sub = this.currentSub;
+    if (!sub) return null;
+    if (sub.key === 'stability' && this.stage === 'reduce') return null;
+    if (this.stage === 'hold' || this.stage === 'reduce') {
+      if (!Number.isFinite(sub.exhaustSeconds)) return null;
+      if (!sub.tailConfirmed) return { key: sub.key, kind: 'brake' };
+      return null;
+    }
+    if (this.stage === 'release') {
+      if (!sub.releaseConfirmed) return { key: sub.key, kind: 'release' };
+      return null;
+    }
     return null;
   }
 
-  get holdProgress() {
-    const a = this.attempt;
-    if (this.phase === FULL_PHASES.SENS_HOLD) return Math.min(100, this.sensHoldElapsed / a.holdDuration * 100);
-    if (this.phase === FULL_PHASES.STAB_HOLD) return Math.min(100, this.stabHoldElapsed / a.holdDuration * 100);
-    return 0;
+  queryTail(state) {
+    const target = this.tailTarget;
+    if (!target) return null;
+    const sub = this.subs[target.key];
+    const record = {
+      kind: target.kind,
+      head: state.trainPipe,
+      tail: state.tailPipe,
+      pressureDifference: Math.abs(state.trainPipe - state.tailPipe),
+      at: state.elapsed,
+    };
+    record.passed = target.kind === 'brake'
+      ? record.pressureDifference <= FULL_TEST_SPEC.common.maxTailDifference && state.trainPipe < this.attempt.nominalTrainPipe - 10
+      : record.pressureDifference <= FULL_TEST_SPEC.common.maxTailDifference && state.trainPipe >= this.attempt.nominalTrainPipe - this.attempt.stablePressureTolerance;
+    if (target.kind === 'brake') sub.tailQuery = record; else sub.releaseTailQuery = record;
+    this.log(`${sub.key}-tail-query-${target.kind}`, record);
+    this.setMessage(record.passed
+      ? `${sub.label}列尾查询：尾部风压与机车端${target.kind === 'brake' ? '同步下降，列车管贯通' : '同步恢复，缓解作用正常'}。`
+      : `${sub.label}列尾查询：尾部风压尚未正常跟随（差 ${record.pressureDifference.toFixed(0)} kPa），请稍候重新查询。`);
+    return record;
   }
 
+  confirmTail() {
+    const target = this.tailTarget;
+    if (!target) return null;
+    const sub = this.subs[target.key];
+    if (target.kind === 'brake') {
+      if (!sub.tailQuery?.passed) {
+        this.setMessage(`${sub.label}：请先查询列尾风压，确认尾部风压与机车端对应后再确认制动作用。`);
+        return null;
+      }
+      sub.tailConfirmed = true;
+      this.log(`${sub.key}-tail-confirm-brake`, {});
+      this.setMessage(`${sub.label}列尾反馈：最后一辆车制动作用正常。`);
+    } else {
+      if (!sub.releaseTailQuery?.passed) {
+        this.setMessage(`${sub.label}：请先查询列尾风压，确认尾部风压恢复后再确认缓解。`);
+        return null;
+      }
+      sub.releaseConfirmed = true;
+      this.log(`${sub.key}-tail-confirm-release`, {});
+      this.setMessage(`${sub.label}列尾反馈：最后一辆车缓解完毕。`);
+    }
+    this.emit();
+    return true;
+  }
+
+  // ------------------------------------------------------------------ 推进
+
+  update(state, dt) {
+    const a = this.attempt;
+    const tol = a.targetPressureTolerance;
+
+    if (this.phase === FULL_PHASES.PREPARE) {
+      const ready = Math.abs(state.trainPipe - a.nominalTrainPipe) <= a.stablePressureTolerance
+        && Math.abs(state.tailPipe - a.nominalTrainPipe) <= a.stablePressureTolerance
+        && state.autoBrake === 0
+        && state.brakeCyl <= FULL_TEST_SPEC.prepare.maxBrakeCyl;
+      this.prepareElapsed = ready ? this.prepareElapsed + dt : 0;
+      if (ready) {
+        this.preparePressure = { head: state.trainPipe, tail: state.tailPipe };
+        this.prepareBrakeCyl = state.brakeCyl;
+      }
+      if (this.prepareElapsed >= a.stableDuration) {
+        this.preparePassed = true;
+        this.log('prepare-pass', { head: state.trainPipe, cylinder: state.brakeCyl });
+        this.phase = FULL_PHASES.SENS_REDUCE;
+        this.setMessage(`列车已充满风（制动主管 ${Math.round(state.trainPipe)} kPa）。${this.stepHint(0)}`);
+      }
+      return;
+    }
+
+    const sub = this.currentSub;
+    if (!sub) return;
+    const spec = FULL_TEST_SPEC[sub.key];
+
+    if (this.stage === 'reduce') {
+      if (sub.reduceStart === null) return;
+      const target = a.nominalTrainPipe - sub.reduction;
+      if (state.trainPipe <= target + tol) {
+        sub.exhaustSeconds = Math.max(0, state.elapsed - sub.reduceStart);
+        sub.holdStart = state.elapsed;
+        sub.holdStartPressure = state.trainPipe;
+        sub.holdStartCyl = state.brakeCyl;
+        sub.holdElapsed = 0;
+        this.nextPhase(`${sub.key === 'sensitivity' ? 'SENS' : 'STAB'}_HOLD`);
+        this.log(`${sub.key}-reduce-reached`, { seconds: sub.exhaustSeconds, pressure: state.trainPipe, cylinder: state.brakeCyl });
+        this.setMessage(`${sub.label}减压达到 ${sub.reduction} kPa（排风 ${sub.exhaustSeconds.toFixed(1)} 秒）。请判断排风时间，并做列尾查询后开始保压。`);
+      }
+      return;
+    }
+
+    if (this.stage === 'hold') {
+      sub.holdElapsed = Math.min(a.holdDuration, Math.max(0, state.elapsed - sub.holdStart));
+      sub.cylRelax = Math.max(0, (sub.holdStartCyl || 0) - state.brakeCyl);
+      sub.holdDrop = Math.max(0, sub.holdStartPressure - state.trainPipe);
+      sub.maxCyl = Math.max(sub.maxCyl, state.brakeCyl);
+      this.tickTimer();
+      if (sub.holdElapsed >= a.holdDuration) {
+        // 保压满之后还要完成列尾风压查询与尾部制动确认（规程要求），做完再进缓解。
+        // 给 25 秒宽限，避免学员漏做列尾动作就卡在这一步拿不到结论。
+        sub.holdWait += dt;
+        if (sub.tailConfirmed || sub.holdWait >= 25) {
+          this.log(`${sub.key}-hold-done`, { cylinderRelax: sub.cylRelax, drop: sub.holdDrop, tailConfirmed: sub.tailConfirmed });
+          this.nextPhase(`${sub.key === 'sensitivity' ? 'SENS' : 'STAB'}_RELEASE`);
+          this.setMessage(`${sub.label}保压完成（制动缸 ${Math.round(state.brakeCyl)} kPa）。${this.stepHint(0)}`);
+        }
+      }
+      return;
+    }
+
+    if (this.stage === 'release') {
+      if (sub.releaseStart === null) return;
+      sub.releaseElapsed = Math.max(0, state.elapsed - sub.releaseStart);
+      // 规程：手柄移至运转位后全列车须在 1 min 内缓解完毕
+      const released = state.brakeCyl <= FULL_TEST_SPEC.release.maxBrakeCyl
+        && state.trainPipe >= a.nominalTrainPipe - a.stablePressureTolerance;
+      if (!sub.releasePassed && released && sub.releaseElapsed <= FULL_TEST_SPEC.release.maxSeconds) {
+        sub.releasePassed = true;
+        this.log(`${sub.key}-released`, { seconds: sub.releaseElapsed });
+      }
+      // 缓解到位后还要做列尾查询并确认尾部缓解；超时（含宽限）一律放行，
+      // 学员仍能拿到完整结论，而不是卡在这一步。
+      if (sub.releasePassed) sub.releaseWait += dt;
+      const releaseDone = sub.releasePassed && (sub.releaseConfirmed || sub.releaseWait >= 25);
+      if (releaseDone || sub.releaseElapsed >= FULL_TEST_SPEC.release.maxSeconds * 2) {
+        const next = NEXT_PHASE[this.phase];
+        this.nextPhase(next);
+        if (next === FULL_PHASES.COMPLETE) {
+          this.log('complete', { head: state.trainPipe, cylinder: state.brakeCyl });
+          this.setMessage('全部试验流程已走完，请核对试验记录单确认最终结论。');
+        } else {
+          this.setMessage(`${sub.label}缓解完成。${this.stepHint(0)}`);
+        }
+      }
+    }
+  }
+
+  nextPhase(phase) {
+    this.phase = phase;
+    this.lastTimerSecond = -1;
+    this.emit();
+  }
+
+  tickTimer() {
+    const second = Math.floor(this.currentSub ? this.currentSub.holdElapsed : 0);
+    if (second !== this.lastTimerSecond) { this.lastTimerSecond = second; this.emit(); }
+  }
+
+  get holdRemaining() {
+    const sub = this.currentSub;
+    if (!sub || this.stage !== 'hold') return null;
+    return Math.max(0, this.attempt.holdDuration - sub.holdElapsed);
+  }
+
+  get holdProgress() {
+    const sub = this.currentSub;
+    if (!sub || this.stage !== 'hold') return null;
+    return Math.min(100, sub.holdElapsed / this.attempt.holdDuration * 100);
+  }
+
+  // ------------------------------------------------------------------ 输出
+
   getSteps(state) {
-    const spec = FULL_TEST_SPEC;
+    const s = this.subs.sensitivity;
+    const t = this.subs.stability;
     const hold = this.attempt.holdDuration;
     return [
-      { label: '充风缓解试验：列车管达定压、制动缸缓解', done: this.chargePassed },
-      { label: `感度试验：自阀减压 ${spec.sensitivity.reduction} kPa`, done: this.sensExhaustSeconds !== null },
-      { label: `感度试验保压 ${hold} 秒并检查制动缸`, done: this.sensHoldStart !== null && this.sensHoldElapsed >= hold },
-      { label: '感度试验后缓解，列车管恢复定压', done: this.sensReleaseAt !== null },
-      { label: `安定试验：自阀减压 ${spec.stability.reduction} kPa`, done: this.stabExhaustSeconds !== null },
-      { label: `安定试验保压 ${hold} 秒并检查是否发生紧急制动`, done: this.stabHoldStart !== null && this.stabHoldElapsed >= hold },
-      { label: '安定试验后缓解，列车管恢复定压', done: this.stabReleaseAt !== null },
-      { label: '紧急制动试验：自阀置紧急位', done: this.emergencyStart !== null },
-      { label: '检查列车管排空时间与制动缸压力', done: this.emergencyCylReachedAt !== null || this.phase === FULL_PHASES.RELEASE || this.phase === FULL_PHASES.COMPLETE },
-      { label: '自阀回运转位，充风缓解', done: this.releaseStart !== null },
-      { label: '确认列车管恢复定压、制动缸归零', done: this.phase === FULL_PHASES.COMPLETE },
+      { label: '试验前准备：列车充满风、制动主管达定压、制动缸缓解', done: this.preparePassed },
+      { label: `感度试验：自阀减压 ${s.reduction} kPa（第 ${s.level} 档）`, done: Number.isFinite(s.exhaustSeconds) },
+      { label: '感度试验：判断列车管排风时间', done: s.answer !== null },
+      { label: '感度试验：列尾风压查询并确认尾部制动作用', done: s.tailConfirmed },
+      { label: `感度试验：保压 ${hold} 秒，检查制动作用与自然缓解`, done: s.holdStart !== null && s.holdElapsed >= hold },
+      { label: '感度试验：自阀回运转位，1 min 内缓解完毕', done: s.releasePassed },
+      { label: '感度试验：列尾查询确认尾部缓解', done: s.releaseConfirmed },
+      { label: `安定试验：自阀施行最大有效减压（${t.reduction} kPa，第 ${t.level} 档）`, done: Number.isFinite(t.exhaustSeconds) },
+      { label: '安定试验：判断列车管排风时间', done: t.answer !== null },
+      { label: '安定试验：列尾风压查询并确认尾部制动作用', done: t.tailConfirmed },
+      { label: `安定试验：保压 ${hold} 秒，检查不发生紧急制动`, done: t.holdStart !== null && t.holdElapsed >= hold },
+      { label: '安定试验：自阀回运转位，1 min 内缓解完毕', done: t.releasePassed },
+      { label: '安定试验：列尾查询确认尾部缓解', done: t.releaseConfirmed },
     ];
   }
 
   exhaustVerdictOf(levelIndex, seconds) {
     const spec = this.attempt.exhaustByLevel?.[levelIndex];
-    if (!spec || spec.reference === null) return 'unknown';
-    if (!Number.isFinite(seconds)) return 'unknown';
+    if (!spec || spec.reference === null || !Number.isFinite(seconds)) return 'unknown';
     if (seconds < spec.min) return 'short';
     if (seconds > spec.max) return 'long';
     return 'normal';
   }
 
-  /**
-   * 全部试验的逐项判定，供记录单与结论使用。
-   * 每项都给出实测值、参考要求与判定，便于逐条对照《技规》。
-   */
+  /** 排风时间的显示口径：调试加速时用加速后的参考值与容差，并与"表中值"一并注明。 */
+  exhaustRangeText(item) {
+    const a = this.attempt;
+    if (!item || item.reference === null) return '—';
+    return a.exhaust.scale === 1
+      ? `${item.min} ～ ${item.max} s（参考 ${item.reference} ± ${item.referenceTolerance} s）`
+      : `${item.min} ～ ${item.max} s（调试加速 1/${Math.round(1 / a.exhaust.scale)}：参考 ${item.expected} ± ${item.tolerance} s，表中值 ${item.reference} s）`;
+  }
+
+  /** 按《铁路机车操作规则》第 15 条逐项判定。 */
   getJudgements(state) {
     const a = this.attempt;
     const spec = FULL_TEST_SPEC;
-    const sensLevel = a.exhaustByLevel?.[spec.sensitivity.level];
-    const stabLevel = a.exhaustByLevel?.[spec.stability.level];
-    const sensVerdict = this.exhaustVerdictOf(spec.sensitivity.level, this.sensExhaustSeconds);
-    const stabVerdict = this.exhaustVerdictOf(spec.stability.level, this.stabExhaustSeconds);
-    // 调试加速时参考值必须与判定区间同口径，避免"实测 6.0 s、参考 24 s、却判合格"的自相矛盾。
-    const range = (item) => {
-      if (!item || item.reference === null) return '—';
-      const basis = a.exhaust.scale === 1
-        ? `参考 ${item.reference} ± ${item.tolerance} s`
-        : `调试加速 1/${Math.round(1 / a.exhaust.scale)}：参考 ${item.expected} ± ${item.tolerance} s，表中值 ${item.reference} s`;
-      return `${item.min} ～ ${item.max} s（${basis}）`;
-    };
-    const exhaustNote = (verdict, label, item, cars) => {
-      // 参考值同样按当前口径给出：调试加速时用加速后的秒数，否则会解释成表格原值。
-      const due = a.exhaust.scale === 1 ? `${item?.reference} s` : `${item?.expected} s（调试加速值）`;
-      if (verdict === 'short') return `${label}实测值低于参考下限。按${a.trainTypeLabel}公式，编组 ${cars} 辆、减压 ${item?.reduction} kPa 应为 ${due}；排风过快可能是折角塞门关闭或制动主管不畅`;
-      if (verdict === 'long') return `${label}实测值高于参考上限。按${a.trainTypeLabel}公式，编组 ${cars} 辆、减压 ${item?.reduction} kPa 应为 ${due}；排风过慢可能是漏泄或车列连接异常`;
-      return '';
-    };
+    const items = [];
 
-    return [
-      {
-        label: '充风缓解·列车管定压',
-        actual: this.chargePressure ? `${Math.round(this.chargePressure.head)} kPa（尾部 ${Math.round(this.chargePressure.tail)} kPa）` : '未确认',
-        reference: `${a.nominalTrainPipe} ± ${a.stablePressureTolerance} kPa`,
-        verdict: this.chargePassed ? 'pass' : 'pending',
+    items.push({
+      label: '试验前准备·制动主管定压',
+      actual: this.preparePressure ? `${Math.round(this.preparePressure.head)} kPa（尾部 ${Math.round(this.preparePressure.tail)} kPa）` : '未确认',
+      reference: `${a.nominalTrainPipe} ± ${a.stablePressureTolerance} kPa`,
+      verdict: this.preparePassed ? 'pass' : 'pending',
+      note: '',
+    });
+    items.push({
+      label: '试验前准备·制动缸缓解',
+      actual: this.prepareBrakeCyl === null ? '未确认' : `${Math.round(this.prepareBrakeCyl)} kPa`,
+      reference: `≤ ${spec.prepare.maxBrakeCyl} kPa`,
+      verdict: this.preparePassed ? 'pass' : 'pending',
+      note: '',
+    });
+
+    for (const key of SUB_ORDER) {
+      const sub = this.subs[key];
+      const conf = spec[key];
+      const level = a.exhaustByLevel?.[conf.level];
+      const verdict = this.exhaustVerdictOf(conf.level, sub.exhaustSeconds);
+      const leak = sub.holdDrop === 0 ? 0 : Math.round(sub.holdDrop * (60 / Math.max(1, sub.holdElapsed)));
+
+      items.push({
+        label: `${sub.shortLabel}·减压量`,
+        actual: Number.isFinite(sub.exhaustSeconds) ? `${sub.reduction} kPa（第 ${sub.level} 档 ${levelName(sub.level)}）` : '未减压',
+        reference: key === 'sensitivity'
+          ? `${sub.reduction} kPa（编组 ${a.formationCars} 辆${a.formationCars >= 60 ? '，60 辆及以上为 70 kPa' : ''}）`
+          : `${sub.reduction} kPa（定压 ${a.nominalTrainPipe} kPa 的最大有效减压）`,
+        verdict: Number.isFinite(sub.exhaustSeconds) ? 'pass' : 'pending',
         note: '',
-      },
-      {
-        label: '充风缓解·制动缸',
-        actual: this.chargeBrakeCyl === null ? '未确认' : `${Math.round(this.chargeBrakeCyl)} kPa`,
-        reference: `≤ ${spec.charge.maxBrakeCyl} kPa（应呈缓解状态）`,
-        verdict: this.chargePassed ? 'pass' : 'pending',
+      });
+      items.push({
+        label: `${sub.shortLabel}·排风时间`,
+        actual: Number.isFinite(sub.exhaustSeconds) ? `${sub.exhaustSeconds.toFixed(1)} s` : '未测得',
+        reference: this.exhaustRangeText(level),
+        verdict: verdict === 'normal' ? 'pass' : verdict === 'unknown' ? 'pending' : 'fail',
+        note: verdict === 'short'
+          ? `${sub.label}排风时间低于参考下限（按${a.trainTypeLabel}公式编组 ${a.formationCars} 辆、减压 ${sub.reduction} kPa 应为 ${a.exhaust.scale === 1 ? level?.reference : level?.expected} s）；排风过快可能是折角塞门关闭或制动主管不畅`
+          : verdict === 'long'
+            ? `${sub.label}排风时间高于参考上限；排风过慢可能是漏泄或车列连接异常`
+            : '',
+      });
+      items.push({
+        label: `${sub.shortLabel}·排风时间判断`,
+        actual: sub.answer === null ? '未作答' : `${EXHAUST_ANSWER_LABELS[sub.answer] || sub.answer}${sub.answerCorrect ? '' : '（判断有误）'}`,
+        reference: '学员判断结果应与实测排风时间相符',
+        verdict: sub.answer === null ? 'pending' : sub.answerCorrect ? 'pass' : 'fail',
+        note: sub.answer !== null && !sub.answerCorrect ? '排风时间判断有误，应按参考表重新判断' : '',
+      });
+
+      if (key === 'sensitivity') {
+        items.push({
+          label: '感度·全列车发生制动作用',
+          actual: sub.maxCyl ? `${Math.round(sub.maxCyl)} kPa` : '未测定',
+          reference: `≥ ${conf.minBrakeCyl} kPa（全列车必须发生制动作用）`,
+          verdict: sub.holdStart === null ? 'pending' : sub.maxCyl >= conf.minBrakeCyl ? 'pass' : 'fail',
+          note: sub.holdStart !== null && sub.maxCyl < conf.minBrakeCyl ? '未发生制动作用，应检查制动主管贯通与分配阀' : '',
+        });
+        items.push({
+          label: '感度·不得自然缓解',
+          actual: sub.holdStart === null ? '未保压' : `保压 ${sub.holdElapsed.toFixed(0)} s 制动缸下降 ${sub.cylRelax.toFixed(0)} kPa`,
+          reference: `保压 ≥ ${a.holdDuration} s 且制动缸下降 ≤ ${conf.maxCylRelax} kPa`,
+          verdict: sub.holdStart === null ? 'pending' : sub.cylRelax <= conf.maxCylRelax ? 'pass' : 'fail',
+          note: sub.holdStart !== null && sub.cylRelax > conf.maxCylRelax ? '保压期间发生自然缓解，应检查制动缸与分配阀' : '',
+        });
+      } else {
+        items.push({
+          label: '安定·不发生紧急制动',
+          actual: sub.holdStart === null ? '未保压' : `保压 ${sub.holdElapsed.toFixed(0)} s 列车管下降 ${sub.holdDrop.toFixed(0)} kPa`,
+          reference: `保压 ≥ ${a.holdDuration} s 且列车管下降 ≤ ${conf.maxHoldDrop} kPa`,
+          verdict: sub.holdStart === null ? 'pending' : sub.holdDrop <= conf.maxHoldDrop ? 'pass' : 'fail',
+          note: sub.holdStart !== null && sub.holdDrop > conf.maxHoldDrop ? '最大有效减压后列车管仍持续下降，发生紧急制动，应检查分配阀安定性' : '',
+        });
+        items.push({
+          label: '安定·制动缸压力',
+          actual: sub.maxCyl ? `${Math.round(sub.maxCyl)} kPa` : '未测定',
+          reference: `≥ ${conf.minBrakeCyl} kPa`,
+          verdict: sub.holdStart === null ? 'pending' : sub.maxCyl >= conf.minBrakeCyl ? 'pass' : 'fail',
+          note: sub.holdStart !== null && sub.maxCyl < conf.minBrakeCyl ? '制动缸压力未达最大有效减压要求，应检查制动缸及闸调器' : '',
+        });
+      }
+
+      items.push({
+        label: `${sub.shortLabel}·制动主管漏泄量`,
+        actual: sub.holdStart === null ? '未测定' : `${leak} kPa/min`,
+        reference: `≤ ${spec.common.maxLeakage} kPa/min`,
+        verdict: sub.holdStart === null ? 'pending' : leak <= spec.common.maxLeakage ? 'pass' : 'fail',
+        note: sub.holdStart !== null && leak > spec.common.maxLeakage ? '制动主管漏泄超限，应查明漏泄处所' : '',
+      });
+
+      items.push({
+        label: `${sub.shortLabel}·列尾查询与制动确认`,
+        actual: sub.tailQuery ? `机车端 ${Math.round(sub.tailQuery.head)} / 尾部 ${Math.round(sub.tailQuery.tail)} kPa（差 ${Math.round(sub.tailQuery.pressureDifference)}）` : '未查询',
+        reference: `查询尾部风压（压差 ≤ ${spec.common.maxTailDifference} kPa）并确认最后一辆车制动作用`,
+        verdict: sub.tailConfirmed ? 'pass' : 'pending',
+        note: sub.tailQuery && !sub.tailConfirmed ? '已查询但未确认尾部制动作用' : '',
+      });
+
+      items.push({
+        label: `${sub.shortLabel}·缓解时间`,
+        actual: sub.releasePassed ? `${sub.releaseElapsed === null ? '—' : sub.releaseElapsed.toFixed(1)} s` : (sub.releaseStart === null ? '未缓解' : '超时未缓解'),
+        reference: `手柄移至运转位后 ≤ ${spec.release.maxSeconds} s（1 min）内缓解完毕`,
+        verdict: sub.releasePassed ? 'pass' : sub.releaseStart === null ? 'pending' : 'fail',
+        note: sub.releaseStart !== null && !sub.releasePassed ? '缓解超时，应检查制动缸缓解通路' : '',
+      });
+      items.push({
+        label: `${sub.shortLabel}·列尾缓解确认`,
+        actual: sub.releaseTailQuery ? `机车端 ${Math.round(sub.releaseTailQuery.head)} / 尾部 ${Math.round(sub.releaseTailQuery.tail)} kPa（差 ${Math.round(sub.releaseTailQuery.pressureDifference)}）` : '未查询',
+        reference: '列尾查询确认尾部压力恢复、最后一辆车缓解',
+        verdict: sub.releaseConfirmed ? 'pass' : 'pending',
         note: '',
-      },
-      {
-        label: '感度试验·减压量',
-        actual: this.sensExhaustSeconds === null ? '未减压' : `${sensLevel?.reduction} kPa（自阀 1 档）`,
-        reference: `${spec.sensitivity.reduction} kPa（自阀初制动位）`,
-        verdict: this.sensExhaustSeconds === null ? 'pending' : 'pass',
-        note: '',
-      },
-      {
-        label: '感度试验·排风时间',
-        actual: Number.isFinite(this.sensExhaustSeconds) ? `${this.sensExhaustSeconds.toFixed(1)} s` : '未测得',
-        reference: range(sensLevel),
-        verdict: sensVerdict === 'normal' ? 'pass' : sensVerdict === 'unknown' ? 'pending' : 'fail',
-        note: exhaustNote(sensVerdict, '感度试验', sensLevel, a.formationCars),
-      },
-      {
-        label: '感度试验·制动缸压力',
-        actual: this.sensHoldStart === null ? '未测定' : `${Math.round(this.sensBrakeCyl)} kPa`,
-        reference: `≥ ${spec.sensitivity.minBrakeCyl} kPa（应产生制动作用）`,
-        verdict: this.sensHoldStart === null ? 'pending' : this.sensBrakeCyl >= spec.sensitivity.minBrakeCyl ? 'pass' : 'fail',
-        note: this.sensHoldStart !== null && this.sensBrakeCyl < spec.sensitivity.minBrakeCyl ? '制动缸压力不足，制动感度不良，应检查分配阀作用' : '',
-      },
-      {
-        label: '感度试验·保压稳定',
-        actual: this.sensHoldStart === null ? '未保压' : `列车管下降 ${this.sensHoldDrop.toFixed(0)} kPa（${this.sensHoldElapsed.toFixed(0)} s）`,
-        reference: `保压 ≥ ${a.holdDuration} s 且列车管下降 ≤ ${spec.sensitivity.maxHoldDrop} kPa`,
-        verdict: this.sensHoldStart === null ? 'pending' : this.sensHoldDrop <= spec.sensitivity.maxHoldDrop ? 'pass' : 'fail',
-        note: this.sensHoldStart !== null && this.sensHoldDrop > spec.sensitivity.maxHoldDrop ? '保压期间列车管持续下降，制动作用不稳定，应检查列车管系漏泄' : '',
-      },
-      {
-        label: '感度试验·缓解恢复',
-        actual: this.sensReleasePressure === null ? '未确认' : `${Math.round(this.sensReleasePressure)} kPa`,
-        reference: `≥ ${a.nominalTrainPipe - a.stablePressureTolerance} kPa（恢复定压后再做安定试验）`,
-        verdict: this.sensReleasePressure === null ? 'pending' : 'pass',
-        note: '',
-      },
-      {
-        label: '安定试验·减压量',
-        actual: this.stabExhaustSeconds === null ? '未减压' : `${stabLevel?.reduction} kPa（自阀 3 档）`,
-        reference: `${spec.stability.reduction} kPa（最大有效减压量）`,
-        verdict: this.stabExhaustSeconds === null ? 'pending' : 'pass',
-        note: '',
-      },
-      {
-        label: '安定试验·排风时间',
-        actual: Number.isFinite(this.stabExhaustSeconds) ? `${this.stabExhaustSeconds.toFixed(1)} s` : '未测得',
-        reference: range(stabLevel),
-        verdict: stabVerdict === 'normal' ? 'pass' : stabVerdict === 'unknown' ? 'pending' : 'fail',
-        note: exhaustNote(stabVerdict, '安定试验', stabLevel, a.formationCars),
-      },
-      {
-        label: '安定试验·制动缸压力',
-        actual: this.stabHoldStart === null ? '未测定' : `${Math.round(this.stabBrakeCyl)} kPa`,
-        reference: `≥ ${spec.stability.minBrakeCyl} kPa（应达到最大有效减压）`,
-        verdict: this.stabHoldStart === null ? 'pending' : this.stabBrakeCyl >= spec.stability.minBrakeCyl ? 'pass' : 'fail',
-        note: this.stabHoldStart !== null && this.stabBrakeCyl < spec.stability.minBrakeCyl ? '制动缸压力未达最大有效减压量要求，应检查制动缸及闸调器' : '',
-      },
-      {
-        label: '安定试验·不得紧急',
-        actual: this.stabHoldStart === null ? '未保压' : `列车管下降 ${this.stabHoldDrop.toFixed(0)} kPa`,
-        reference: `保压 ≥ ${a.holdDuration} s 且列车管下降 ≤ ${spec.stability.maxHoldDrop} kPa`,
-        verdict: this.stabHoldStart === null ? 'pending' : this.stabHoldDrop <= spec.stability.maxHoldDrop ? 'pass' : 'fail',
-        note: this.stabHoldStart !== null && this.stabHoldDrop > spec.stability.maxHoldDrop ? '减压 140 kPa 后列车管仍持续下降，发生紧急制动，应检查分配阀安定性' : '',
-      },
-      {
-        label: '安定试验·缓解恢复',
-        actual: this.stabReleasePressure === null ? '未确认' : `${Math.round(this.stabReleasePressure)} kPa`,
-        reference: `≥ ${a.nominalTrainPipe - a.stablePressureTolerance} kPa（恢复定压后再做紧急制动试验）`,
-        verdict: this.stabReleasePressure === null ? 'pending' : 'pass',
-        note: '',
-      },
-      {
-        label: '紧急制动·列车管排空时间',
-        actual: Number.isFinite(this.emergencyExhaustSeconds) ? `${this.emergencyExhaustSeconds.toFixed(1)} s` : '未测得',
-        reference: `≤ ${spec.emergency.maxExhaustSeconds} s 降至 0`,
-        verdict: !Number.isFinite(this.emergencyExhaustSeconds) ? 'pending'
-          : this.emergencyExhaustSeconds <= spec.emergency.maxExhaustSeconds ? 'pass' : 'fail',
-        note: Number.isFinite(this.emergencyExhaustSeconds) && this.emergencyExhaustSeconds > spec.emergency.maxExhaustSeconds
-          ? '列车管排空过慢，紧急制动作用不良，应检查紧急放风阀' : '',
-      },
-      {
-        label: '紧急制动·制动缸压力',
-        actual: this.emergencyBrakeCyl ? `${Math.round(this.emergencyBrakeCyl)} kPa` : '未测定',
-        reference: `≥ ${spec.emergency.minBrakeCyl} kPa`,
-        verdict: this.emergencyBrakeCyl === 0 ? 'pending' : this.emergencyBrakeCyl >= spec.emergency.minBrakeCyl ? 'pass' : 'fail',
-        note: this.emergencyBrakeCyl > 0 && this.emergencyBrakeCyl < spec.emergency.minBrakeCyl ? '紧急制动时制动缸压力不足，应检查制动缸及紧急阀' : '',
-      },
-      {
-        label: '紧急制动·制动缸达标时间',
-        actual: Number.isFinite(this.emergencyCylReachedAt) ? `${this.emergencyCylReachedAt.toFixed(1)} s` : '未达标',
-        reference: `≤ ${spec.emergency.maxBrakeCylSeconds} s 达到规定压力`,
-        verdict: !Number.isFinite(this.emergencyCylReachedAt) ? 'pending'
-          : this.emergencyCylReachedAt <= spec.emergency.maxBrakeCylSeconds ? 'pass' : 'fail',
-        note: Number.isFinite(this.emergencyCylReachedAt) && this.emergencyCylReachedAt > spec.emergency.maxBrakeCylSeconds
-          ? '制动缸升压过慢，应检查制动缸与作用阀' : '',
-      },
-      {
-        label: '缓解·列车管恢复',
-        actual: this.releasePressure === null ? '未确认' : `${Math.round(this.releasePressure)} kPa`,
-        reference: `≥ ${a.nominalTrainPipe - a.stablePressureTolerance} kPa`,
-        verdict: this.releasePassed ? 'pass' : 'pending',
-        note: '',
-      },
-      {
-        label: '缓解·制动缸归零',
-        actual: this.releaseBrakeCyl === null ? '未确认' : `${Math.round(this.releaseBrakeCyl)} kPa`,
-        reference: `≤ ${spec.release.maxBrakeCyl} kPa`,
-        verdict: this.releasePassed ? 'pass' : 'pending',
-        note: '',
-      },
-    ];
+      });
+    }
+
+    return items;
   }
 
   getConclusion(state) {

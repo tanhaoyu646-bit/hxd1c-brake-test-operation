@@ -21,8 +21,9 @@ for /f "tokens=2 delims=:" %%a in ('ipconfig ^| findstr /i "IPv4"') do (
 )
 echo.
 echo   可选参数（直接在地址后追加，可叠加）:
-echo       ?test=full          全部试验（充风缓解/感度/安定/紧急制动）
+echo       ?test=full          全部试验（感度试验 + 安定试验）
 echo       ?type=passenger     按客车公式算排风时间（默认货车）
+echo       ?cars=48            编组辆数（20/30/40/48/60，默认 30）
 echo       ?debug=1            保压与排风均加速（开发调试用）
 echo       ?scenario=short     排风时间过短（尾部响应迟缓）
 echo       ?scenario=long      排风时间过长

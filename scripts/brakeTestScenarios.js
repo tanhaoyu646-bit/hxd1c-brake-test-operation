@@ -61,7 +61,7 @@ export const TRAIN_TYPES = {
     key: 'freight',
     label: '货车',
     formationCars: 48,
-    formulaText: 'T = 辆数 × 常数（50 kPa→0.5，100 kPa→0.8，140 kPa→1.0）',
+    formulaText: 'T = 辆数 × 常数（50 kPa→0.5，100 kPa→0.8，140 kPa→1.0，170 kPa→1.15；170 kPa 为定压 600 kPa 的最大有效减压，超出表范围按末段斜率推算）',
     referenceSeconds(cars, reduction) {
       return cars * freightConstant(reduction);
     },
@@ -117,9 +117,17 @@ export function buildExhaustReference(trainTypeKey, cars, reduction, scale = 1) 
   };
 }
 
-/** 自阀各制动位对应的列车管减压量（必须与 dynamics.js 的 reductions 保持一致）。 */
-export function levelReductions(nominalTrainPipe, targetReduction) {
-  return [0, 50, targetReduction, 140, 170, nominalTrainPipe];
+/**
+ * 自阀各制动位对应的列车管减压量（必须与 dynamics.js 的 reductions 保持一致）。
+ *
+ * 第 1 档是感度试验用的初制动位，减压量随编组变化：
+ * 《铁路机车操作规则》第 15 条 —— 编组 60 辆及以上时减压 70 kPa，60 辆以下为 50 kPa。
+ * 第 4 档 170 kPa 是定压 600 kPa 下的最大有效减压量（安定试验用）；
+ * 第 3 档 140 kPa 是定压 500 kPa 下的最大有效减压量，保留该档便于对照。
+ */
+export function levelReductions(nominalTrainPipe, targetReduction, cars = 0) {
+  const sensitivity = Number(cars) >= 60 ? 70 : 50;
+  return [0, sensitivity, targetReduction, 140, 170, nominalTrainPipe];
 }
 
 /**
@@ -133,7 +141,7 @@ export function levelReductions(nominalTrainPipe, targetReduction) {
  */
 export function buildExhaustByLevel(trainTypeKey, cars, nominalTrainPipe, targetReduction, timeScale) {
   const type = TRAIN_TYPES[resolveTrainType(trainTypeKey)];
-  return levelReductions(nominalTrainPipe, targetReduction).map((reduction, index) => {
+  return levelReductions(nominalTrainPipe, targetReduction, cars).map((reduction, index) => {
     if (index === 0 || reduction <= 0) {
       return { level: index, reduction: 0, reference: 0, min: 0, max: 0, tolerance: 0, checked: true };
     }
@@ -182,42 +190,45 @@ export function testModeLabel(key) {
 }
 
 /**
- * 全部试验四个子项的判定规格（货车，列车管定压 600 kPa）。
+ * 列车自动制动机「全部试验」判定规格（列车管定压 600 kPa）。
  *
- * 判定值按常用教学口径设定，集中在这里便于按本校教材调整：
- * 制动缸压力与减压量成正比（3.2 kPa / kPa，上限 450），故
- * 感度 50 kPa → 160 kPa、安定 140 kPa → 448 kPa、紧急 → 450 kPa。
+ * 依据《铁路机车操作规则》第 15 条（与《技规》一致）：
+ *   全部试验 = **感度试验 + 安定试验两项，不包含紧急制动试验**。
+ *   · 感度试验：自阀减压 50 kPa（编组 60 辆及以上为 70 kPa）并保压 1 min，
+ *     全列车必须发生制动作用、不得自然缓解；手柄移至运转位后全列车须在 1 min 内缓解完毕。
+ *   · 安定试验：自阀施行最大有效减压（定压 600 kPa 时为 170 kPa），要求不发生紧急制动。
+ *   · 两项都要检查制动主管漏泄量 ≤ 20 kPa/min，并做列尾风压查询。
+ *
+ * 制动缸压力与减压量成正比（3.2 kPa/kPa，上限 450 kPa）：感度 50 kPa → 160 kPa、
+ * 安定 170 kPa → 450 kPa（封顶）。阈值集中在下方，可按本校教材调整。
  */
 export const FULL_TEST_SPEC = {
-  charge: {
-    label: '充风缓解试验',
+  prepare: {
+    label: '试验前准备',
     maxBrakeCyl: 15,
   },
   sensitivity: {
     label: '感度试验',
     level: 1,
-    reduction: 50,
-    minBrakeCyl: 100,
     holdDuration: 60,
-    maxHoldDrop: 12,
+    minBrakeCyl: 60,     // 「全列车必须发生制动作用」——与 0 明显区分即可
+    maxCylRelax: 20,     // 「不得自然缓解」：保压期间制动缸压力下降上限
   },
   stability: {
     label: '安定试验',
-    level: 3,
-    reduction: 140,
-    minBrakeCyl: 380,
+    level: 4,            // 定压 600 kPa 的最大有效减压 = 170 kPa
     holdDuration: 60,
-    maxHoldDrop: 25,
+    minBrakeCyl: 320,    // 应达到最大有效减压对应的制动缸压力
+    maxHoldDrop: 25,     // 「不发生紧急制动」：保压期间列车管不得持续下降
   },
-  emergency: {
-    label: '紧急制动试验',
-    level: 5,
-    maxExhaustSeconds: 6,
-    minBrakeCyl: 400,
-    maxBrakeCylSeconds: 9,
+  /** 两项共同要求 */
+  common: {
+    maxLeakage: 20,      // 制动主管漏泄量 ≤ 20 kPa/min
+    maxTailDifference: 18,
   },
   release: {
     maxBrakeCyl: 15,
+    maxSeconds: 60,      // 「手柄移至运转位后全列车须在 1min 内缓解完毕」
   },
 };
 
@@ -233,7 +244,7 @@ export const DEFAULT_FORMATION_CARS = 30;
 
 const BASE_SCENARIO = {
   id: 'simple-normal',
-  title: '简略试验 · 标准编组',
+  title: '标准编组',
   formationCars: DEFAULT_FORMATION_CARS,
   nominalTrainPipe: 600,
   targetReduction: 100,
@@ -254,21 +265,21 @@ const SCENARIOS = {
   short: {
     ...BASE_SCENARIO,
     id: 'simple-short-exhaust',
-    title: '简略试验 · 排风过短',
+    title: '排风过短',
     exhaustScale: 0.4,
     tailResponseRate: 0.08,
   },
   long: {
     ...BASE_SCENARIO,
     id: 'simple-long-exhaust',
-    title: '简略试验 · 排风过长',
+    title: '排风过长',
     exhaustScale: 1.6,
     tailResponseRate: 0.2,
   },
   leak: {
     ...BASE_SCENARIO,
     id: 'simple-excessive-leakage',
-    title: '简略试验 · 保压漏泄异常',
+    title: '保压漏泄异常',
     simulatedLeakagePerMinute: 28,
   },
 };
@@ -352,7 +363,8 @@ export function createSimpleBrakeAttempt(search = '', overrides = {}) {
   // 各制动位的排风速率（kPa/s）：由参考表按该档减压量算出的排风时间反推，
   // 并乘场景倍率（注入"排风过短/过长"时整机排风特性改变）与调试加速。
   const type = TRAIN_TYPES[trainTypeKey];
-  const exhaustRates = levelReductions(source.nominalTrainPipe, source.targetReduction).map((reduction, index) => {
+  const levelReductionList = levelReductions(source.nominalTrainPipe, source.targetReduction, formationCars);
+  const exhaustRates = levelReductionList.map((reduction, index) => {
     if (index === 0 || index === 5 || reduction <= 0) return 0;
     const seconds = type.referenceSeconds(formationCars, reduction) * source.exhaustScale * timeScale;
     return seconds > 0 ? reduction / seconds : 0;
@@ -381,6 +393,8 @@ export function createSimpleBrakeAttempt(search = '', overrides = {}) {
     exhaust,
     exhaustByLevel,
     exhaustRates,
+    /** 自阀 6 个制动位对应的减压量，供物理模拟与流程共用（感度档随编组变化）。 */
+    levelReductions: levelReductionList,
     /** 参考表算出的本车排风时间（× 场景倍率 × 调试加速），供物理与评分使用 */
     simulatedExhaustSeconds: Math.max(1, exhaust.reference * source.exhaustScale * timeScale),
     /** 判定区间（已含加速），保留 {min,max} 结构供 classifyExhaustTime 使用 */

@@ -132,7 +132,8 @@ export class TrainSimulation {
     const mainTarget = s.compressor && s.mainBreaker ? 900 : 0; s.mainRes += (mainTarget - s.mainRes) * Math.min(1, dt * (s.compressor ? .22 : .02));
     // 自阀各制动位按本轮列车管定压计算。第二常用制动档专用于简略试验的 100 kPa 减压。
     const nominal = this.config.nominalTrainPipe;
-    const reductions = [0, 50, this.config.targetReduction, 140, 170, nominal];
+    // 各制动位的减压量由场景层给出：感度档（第 1 档）随编组变化——60 辆及以上为 70 kPa。
+    const reductions = this.config.levelReductions || [0, 50, this.config.targetReduction, 140, 170, nominal];
     const equalizingTargets = reductions.map((reduction) => Math.max(0, nominal - reduction));
     const equalizingTarget = s.mainRes > 450 ? equalizingTargets[s.autoBrake] : 0;
     const emergencyBrake = s.autoBrake >= 5;

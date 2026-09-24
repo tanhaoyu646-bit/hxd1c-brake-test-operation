@@ -1,8 +1,8 @@
 import { TrainSimulation } from './dynamics.js?rev=linear-exhaust-600kpa-v2-20260923';
 import { MstsRouteScene } from './mstsRouteScene.js?rev=texture-case-v9-20260922';
-import { createSimpleBrakeAttempt, EXHAUST_ANSWER_LABELS, SCENARIO_OPTIONS, EXAM_KEY, TEST_MODE_OPTIONS, FORMATION_OPTIONS } from './brakeTestScenarios.js?rev=auto-levels-v4-20260924';
-import { BrakeTestWorkflow } from './brakeTestWorkflow.js?rev=auto-levels-v4-20260924';
-import { FullTestWorkflow } from './fullTestWorkflow.js?rev=auto-levels-v4-20260924';
+import { createSimpleBrakeAttempt, EXHAUST_ANSWER_LABELS, SCENARIO_OPTIONS, EXAM_KEY, TEST_MODE_OPTIONS, FORMATION_OPTIONS } from './brakeTestScenarios.js?rev=regulatory-full-test-v5-20260924';
+import { BrakeTestWorkflow } from './brakeTestWorkflow.js?rev=regulatory-full-test-v5-20260924';
+import { FullTestWorkflow } from './fullTestWorkflow.js?rev=regulatory-full-test-v5-20260924';
 import { buildBrakeTestRecord, formatRecordText, buildRecordHtml } from './brakeTestRecord.js?rev=all-brake-tests-v2-20260923';
 
 const $ = (q) => document.querySelector(q);
@@ -264,22 +264,30 @@ function renderTraining(state,message='') {
   // 参考排风时间由车型与编组按公式算出（客车 0.75×辆数×减压量/100；货车 辆数×常数），
   // 不再写死区间——改车型或改编组时判定基准自动跟着变。调试加速下显示值要与判定区间同口径，
   // 否则会出现"参考 24 秒、允许 5.4～6.6 秒"这种自相矛盾的表述。
-  const speedNote=a.exhaust.scale===1?'':`（调试加速 1/${Math.round(1/a.exhaust.scale)}，表中值 ${a.exhaust.reference} 秒）`;
+  // 全部试验的两档（感度用第 1 档、安定用第 4 档）参考时间也来自同一张表，不另设数值。
+  const speedNote=a.exhaust.scale===1?'':`（调试加速 1/${Math.round(1/a.exhaust.scale)}）`;
   const exhaustLine=full
-    ? `各档参考排风时间：${a.exhaustByLevel.filter(x=>x.checked&&(x.reduction===50||x.reduction===140)).map(x=>`${x.reduction} kPa → ${x.expected} s`).join(' · ')}${speedNote}`
+    ? `各档参考排风时间：${[a.exhaustByLevel[1],a.exhaustByLevel[4]].map(x=>`${x.reduction} kPa → ${x.expected} s`).join(' · ')}${speedNote}`
     : `参考排风时间 ${a.exhaust.expected} 秒（允许 ${a.exhaust.min} ～ ${a.exhaust.max} 秒）${speedNote}`;
   $('#attempt-summary').innerHTML=`<strong>${summaryTitle}</strong><br>${a.testModeLabel} · ${a.trainTypeLabel} · 编组 ${a.formationCars} 辆 · 定压 ${a.nominalTrainPipe} kPa${full?'':' · 减压 '+a.targetReduction+' kPa'}<br>${exhaustLine}<br><span class="formula-tag">${a.exhaust.formulaText}</span>${a.debugFast?'<br><span class="tag">调试模式：保压与排风均已加速，不得作为正式记录</span>':''}`;
   const observation=$('#observation');
   if(full){
-    // 全部试验按子项列出已测得的排风/排空时间，学员一眼看到进度。
-    const measured=[
-      Number.isFinite(workflow.sensExhaustSeconds)?`感度 50 kPa 排风 <b>${workflow.sensExhaustSeconds.toFixed(1)}</b> s`:'',
-      Number.isFinite(workflow.stabExhaustSeconds)?`安定 140 kPa 排风 <b>${workflow.stabExhaustSeconds.toFixed(1)}</b> s`:'',
-      Number.isFinite(workflow.emergencyExhaustSeconds)?`紧急排空 <b>${workflow.emergencyExhaustSeconds.toFixed(1)}</b> s`:'',
-    ].filter(Boolean);
-    observation.innerHTML=measured.length
-      ?`已测：${measured.join('　｜　')}<br>制动缸 <b>${state.brakeCyl.toFixed(0)}</b> kPa`
-      :'尚未测得排风时间。请按提示依次操作自阀：1 档（感度）→ 3 档（安定）→ 5 档（紧急）→ 运转位。';
+    // 全部试验按子项列出已测得的数据与待办动作，学员一眼看到进度。
+    const subs=workflow.subs;
+    const rows=[];
+    for(const key of ['sensitivity','stability']){
+      const sub=subs[key];if(!sub)continue;
+      const parts=[];
+      if(Number.isFinite(sub.exhaustSeconds))parts.push(`排风 <b>${sub.exhaustSeconds.toFixed(1)}</b> s`);
+      if(sub.answer!==null)parts.push(`判断${sub.answerCorrect?'正确':'有误'}`);
+      if(sub.tailConfirmed)parts.push('尾部制动已确认');
+      if(sub.releasePassed)parts.push('已缓解');
+      if(sub.releaseConfirmed)parts.push('尾部缓解已确认');
+      rows.push(`${sub.label}（${sub.reduction} kPa）：${parts.length?parts.join('　'):'<span class="pending">待操作</span>'}`);
+    }
+    const todo=workflow.stage==='hold'&&workflow.answerTarget?'请先点「判断排风时间」完成本步判断。'
+      :workflow.tailTarget?'请做列尾风压查询与尾部反馈确认。':'请按提示操作自阀。';
+    observation.innerHTML=`${rows.join('<br>')}<br><span class="muted">${todo}</span>　制动缸 <b>${state.brakeCyl.toFixed(0)}</b> kPa`;
     observation.className='observation';
   } else {
     const latest=workflow.tailReleaseQuery||workflow.tailBrakeQuery;
@@ -287,11 +295,19 @@ function renderTraining(state,message='') {
     else if(Number.isFinite(workflow.exhaustSeconds)){observation.innerHTML=`本次列车管减压耗时 <b>${workflow.exhaustSeconds.toFixed(1)} 秒</b>。请根据编组和排风时间表完成判断。`;observation.className='observation';}
     else{observation.textContent='尚无测量结果。完成100 kPa减压后将记录排风时间。';observation.className='observation';}
   }
-  // 列尾风压查询只属于简略试验（《技规》全部试验不含列尾项）；全部试验把这一区整体隐藏，
-  // 学员按阶段提示只操作自阀，界面保持干净。两处入口共用同一批启用条件，避免状态打架。
-  $('#test-actions').hidden=full;
+  // 全部试验同样要做「判断排风时间 + 列尾查询 + 列尾反馈」——按《铁路机车操作规则》第 15 条，
+  // 两项试验都要检查制动主管漏泄并做列尾风压查询。两个子试验的这批动作由 workflow 逐个给出，
+  // 这里只按它返回的目标启用对应按钮，两个表单试验共用同一套逻辑。
+  const fullTailTarget=full?workflow.tailTarget:null;
+  const fullTailSub=fullTailTarget?workflow.subs[fullTailTarget.key]:null;
   const tailGate=full
-    ?{judge:false,queryBrake:false,confirmBrake:false,queryRelease:false,confirmRelease:false}
+    ?{
+      judge:Boolean(workflow.answerTarget),
+      queryBrake:fullTailTarget?.kind==='brake'&&!fullTailSub?.tailQuery?.passed,
+      confirmBrake:fullTailTarget?.kind==='brake'&&Boolean(fullTailSub?.tailQuery?.passed)&&!fullTailSub?.tailConfirmed,
+      queryRelease:fullTailTarget?.kind==='release'&&!fullTailSub?.releaseTailQuery?.passed,
+      confirmRelease:fullTailTarget?.kind==='release'&&Boolean(fullTailSub?.releaseTailQuery?.passed)&&!fullTailSub?.releaseConfirmed,
+    }
     :{
     judge:Number.isFinite(workflow.exhaustSeconds)&&workflow.phase!=='COMPLETE'&&workflow.phase!=='FAILED',
     queryBrake:workflow.phase==='HOLD',
@@ -299,6 +315,13 @@ function renderTraining(state,message='') {
     queryRelease:workflow.phase==='RELEASE'&&workflow.releaseStart!==null,
     confirmRelease:workflow.phase==='RELEASE'&&Boolean(workflow.tailReleaseQuery?.passed)&&!workflow.tailReleaseConfirmed,
   };
+  // 按钮文案按当前子试验变化，学员一眼知道这一步在给哪项试验做动作。
+  const subLabel=full?(workflow.currentSub?.label||''):'';
+  $('#judge-exhaust').textContent=full?`判断${subLabel}排风时间`:'判断排风时间';
+  $('#query-tail-brake').textContent=full?`列尾风压查询（${subLabel}后）`:'列尾风压查询';
+  $('#confirm-tail-brake').textContent=full?`确认尾部制动反馈（${subLabel}）`:'获取尾部制动反馈';
+  $('#query-tail-release').textContent=full?`列尾风压查询（${subLabel}缓解后）`:'缓解后列尾风压查询';
+  $('#confirm-tail-release').textContent=full?`确认尾部缓解反馈（${subLabel}）`:'获取尾部缓解反馈';
   $('#judge-exhaust').disabled=!tailGate.judge;
   $('#query-tail-brake').disabled=!tailGate.queryBrake;
   $('#confirm-tail-brake').disabled=!tailGate.confirmBrake;
@@ -352,9 +375,22 @@ async function exitImmersive(){
   routeScene.resize();
 }
 function openAnswerModal(){
-  if(!Number.isFinite(workflow.exhaustSeconds)){workflow.setMessage('排风时间尚未测得，不能答题。');return;}
-  const expected=attempt.expectedExhaustSeconds;
-  $('#answer-question').textContent=`本次列车编组 ${attempt.formationCars} 辆，列车管由 ${attempt.nominalTrainPipe} kPa 降至 ${attempt.targetTrainPipe} kPa，实测排风时间 ${workflow.exhaustSeconds.toFixed(1)} 秒。参考范围 ${expected.min}～${expected.max} 秒，请判断。`;
+  // 两个试验项目的排风时间口径不同：简略试验只有一项，全部试验的感度/安定各一项，
+  // 而且参考时间随编组与减压量变化，题目文字必须按当前子项生成。
+  if(attempt.testMode==='full'){
+    const key=workflow.answerTarget;
+    if(!key){workflow.setMessage('当前不需要判断排风时间。');return;}
+    const sub=workflow.subs[key];
+    const spec=attempt.exhaustByLevel[sub.level];
+    const range=attempt.exhaust.scale===1
+      ? `参考排风时间 ${spec.reference} 秒（允许 ${spec.min} ～ ${spec.max} 秒）`
+      : `参考排风时间 ${spec.expected} 秒（允许 ${spec.min} ～ ${spec.max} 秒，调试加速 1/${Math.round(1/attempt.exhaust.scale)}）`;
+    $('#answer-question').textContent=`${sub.label}：列车编组 ${attempt.formationCars} 辆，列车管由 ${attempt.nominalTrainPipe} kPa 减压 ${sub.reduction} kPa，实测排风时间 ${sub.exhaustSeconds.toFixed(1)} 秒。${range}，请判断。`;
+  }else{
+    if(!Number.isFinite(workflow.exhaustSeconds)){workflow.setMessage('排风时间尚未测得，不能答题。');return;}
+    const expected=attempt.expectedExhaustSeconds;
+    $('#answer-question').textContent=`本次列车编组 ${attempt.formationCars} 辆，列车管由 ${attempt.nominalTrainPipe} kPa 降至 ${attempt.targetTrainPipe} kPa，实测排风时间 ${workflow.exhaustSeconds.toFixed(1)} 秒。参考范围 ${expected.min}～${expected.max} 秒，请判断。`;
+  }
   $('#answer-feedback').textContent='';$('#answer-feedback').className='answer-feedback';
   $('#answer-modal').classList.add('open');$('#answer-modal').setAttribute('aria-hidden','false');document.body.classList.add('device-panel-active');
 }
@@ -462,16 +498,19 @@ function updateCirPressure(dt){
 function onCirKey(code){
   if(code==='bt12'||code==='bt9'){
     if(!cirLinked()){setCirNotice('列尾装置未连接：请先按「主控」进入主菜单，选第 6 项输入 6 位列尾号，再查询尾部风压。');return;}
-    // 列尾查询是简略试验的判定项；全部试验不含此项，CIR 只作观察用，不产生任何记录。
-    if(typeof workflow.queryTail!=='function'){
-      setCirNotice('当前为全部试验，列尾风压查询不参与本次判定，CIR 仅用于观察尾部风压。');
+    // 全部试验按《铁路机车操作规则》第 15 条同样要做列尾风压查询，但只在感度/安定
+    // 的制动后与缓解后这两个时机有效；时机不对时给提示而不是默默记一笔。
+    if(attempt.testMode==='full'&&!workflow.tailTarget){
+      setCirNotice('当前阶段无需列尾查询，请按流程提示操作。');
       return;
     }
     if(code==='bt12'){
       syncCirPressure(true);
-      workflow.queryTail(sim.state,workflow.phase==='RELEASE'?'release':'brake');
+      const result=workflow.queryTail(sim.state,workflow.phase==='RELEASE'?'release':'brake');
+      if(result)setCirNotice(result.passed?'列尾风压与机车端对应，列车管贯通。':'尾部风压尚未正常跟随，请稍候重新查询。');
     }else{
-      workflow.confirmTail(workflow.phase==='RELEASE'?'release':'brake');
+      const ok=workflow.confirmTail(workflow.phase==='RELEASE'?'release':'brake');
+      if(ok===null)setCirNotice('请先查询列尾风压，确认尾部风压与机车端对应后再执行本动作。');
     }
   }else if(code==='bt10'){                // 列尾销号
     setCirNotice('列尾装置已销号，尾部风压不再可靠。');

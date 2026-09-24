@@ -57,8 +57,8 @@ function buildSimpleScore(attempt, state, workflow) {
 
 /**
  * 全部试验评分：判定项通过 80 / 顺序与操纵 20 − 无关操作扣分。
- * 标准自阀操作为 6 次拖动（1 档→运转位→3 档→运转位→5 档→运转位），
- * 子试验之间必须恢复定压，多拉一次扣一档分。
+ * 标准自阀操作为 4 次拖动（1 档感度 → 运转位 → 4 档安定 → 运转位），
+ * 两个子试验之间必须恢复定压，多拉一次扣一档分。
  */
 function buildFullScore(attempt, state, workflow) {
   const items = workflow.getJudgements(state);
@@ -66,14 +66,14 @@ function buildFullScore(attempt, state, workflow) {
   const passPoints = Math.round(passed / items.length * 80);
 
   const operations = workflow.autoBrakeOperations || 0;
-  const extra = Math.max(0, operations - 6);
+  const extra = Math.max(0, operations - 4);
   const orderPoints = extra === 0 ? 20 : extra === 1 ? 14 : extra === 2 ? 8 : 0;
 
   const deduction = Math.min(15, state.rejected * 3);
 
   const parts = [
     { label: '判定项通过', points: passPoints, max: 80, detail: `${passed}/${items.length} 项合格` },
-    { label: '顺序与操纵', points: orderPoints, max: 20, detail: `自阀操作 ${operations} 次（标准 6 次：1 档→运转位→3 档→运转位→5 档→运转位）` },
+    { label: '顺序与操纵', points: orderPoints, max: 20, detail: `自阀操作 ${operations} 次（标准 4 次：1 档感度→运转位→4 档安定→运转位）` },
     { label: '无关设备操作扣分', points: -deduction, max: 0, detail: deduction ? `${state.rejected} 次，扣 ${deduction} 分` : '无' },
   ];
   const total = Math.max(0, Math.min(100, parts.reduce((sum, part) => sum + part.points, 0)));
